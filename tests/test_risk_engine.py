@@ -1,0 +1,145 @@
+from datetime import time
+
+import pytest
+
+from titan.brokers.base import Order, OrderSide, OrderType, Product
+from titan.risk.engine import RiskEngine, RiskState
+from titan.risk.limits import RiskLimits
+
+
+def make_limits(**overrides) -> RiskLimits:
+    base = dict(
+        capital=500_000.0,
+        max_risk_per_trade_pct=1.0,
+        max_daily_loss_pct=2.0,
+        max_weekly_loss_pct=5.0,
+        max_drawdown_pct=10.0,
+        max_consecutive_losses=3,
+        max_concurrent_positions=2,
+        intraday_square_off=time(15, 15),
+    )
+    base.update(overrides)
+    return RiskLimits(**base)
+
+
+def make_state(equity=500_000.0, **overrides) -> RiskState:
+    s = RiskState(starting_equity=equity, peak_equity=equity, current_equity=equity)
+    for k, v in overrides.items():
+        setattr(s, k, v)
+    return s
+
+
+def order(entry=100.0, qty=10) -> Order:
+    return Order(symbol="NIFTY", side=OrderSide.BUY, qty=qty,
+                 order_type=OrderType.MARKET, product=Product.INTRADAY, price=entry)
+
+
+def test_approves_normal_order(ist_now_factory):
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert dec.approved
+
+
+def test_kill_switch_blocks(ist_now_factory):
+    s = make_state()
+    s.kill_switch = True
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "kill" in dec.reason
+
+
+def test_after_cutoff_blocks(ist_now_factory):
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(15, 20))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "cutoff" in dec.reason
+
+
+def test_pre_market_blocks(ist_now_factory):
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(9, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+
+
+def test_daily_loss_cap(ist_now_factory):
+    s = make_state(realized_pnl_today=-10_000.0)  # cap is 2% of 5L = 10k
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "daily loss" in dec.reason
+
+
+def test_drawdown_cap(ist_now_factory):
+    s = make_state(current_equity=450_000, peak_equity=500_000)  # 10% DD = cap
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=450_000)
+    assert not dec.approved
+    assert "drawdown" in dec.reason
+
+
+def test_consecutive_losses(ist_now_factory):
+    s = make_state(consecutive_losses=3)
+    eng = RiskEngine(make_limits(max_consecutive_losses=3), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "consecutive" in dec.reason
+
+
+def test_concurrent_positions(ist_now_factory):
+    s = make_state(open_positions=2)
+    eng = RiskEngine(make_limits(max_concurrent_positions=2), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+
+
+def test_per_trade_cap_shrinks_qty(ist_now_factory):
+    # cap = 1% of 5L = 5k. qty=10 × per_unit_risk=2000 = 20k → over cap.
+    # max qty = 5000//2000 = 2
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(qty=10), per_unit_risk=2000, available_cash=500_000)
+    assert dec.approved
+    assert dec.adjusted_qty == 2
+
+
+def test_per_trade_cap_unreachable_rejects(ist_now_factory):
+    # per_unit_risk 6000 > cap 5000 → cannot fit even qty 1
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(qty=1), per_unit_risk=6000, available_cash=500_000)
+    assert not dec.approved
+
+
+def test_session_halt_is_sticky(ist_now_factory):
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(15, 20))
+    eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    # later, before cutoff — but state should now be halted_today
+    eng._now = ist_now_factory(10, 0)
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "halted" in dec.reason
+
+
+def test_state_on_trade_closed_loss_increments_consec():
+    s = make_state()
+    s.on_trade_closed(-1000)
+    s.on_trade_closed(-500)
+    assert s.consecutive_losses == 2
+    s.on_trade_closed(+200)
+    assert s.consecutive_losses == 0
+
+
+def test_state_peak_equity_tracks_high_water_mark():
+    s = make_state()
+    s.on_trade_closed(+10_000)
+    assert s.peak_equity == 510_000
+    s.on_trade_closed(-3_000)
+    assert s.peak_equity == 510_000
+    assert s.drawdown_inr == 3_000
+
+
+def test_trigger_kill_sets_state():
+    eng = RiskEngine(make_limits(), make_state())
+    eng.trigger_kill("test")
+    assert eng.state.kill_switch
+    assert eng.state.halted_today
+    assert "KILL" in eng.state.halt_reason
