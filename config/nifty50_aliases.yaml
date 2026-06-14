@@ -1,0 +1,164 @@
+# NIFTY-50 ticker → aliases (case-insensitive substrings matched against
+# headlines). Order does NOT matter — longest match wins for multi-word
+# overlaps. BSE numeric scrip codes included so BSE feed maps directly.
+#
+# Format:
+#   TICKER:
+#     name: Full company name
+#     aliases: [list of alternative names, abbreviations, BSE scrip code as str]
+#
+# Curated 2026-06 against NIFTY-50 constituents.
+
+ADANIENT:
+  name: Adani Enterprises
+  aliases: ["Adani Enterprises", "Adani Ent", "AEL", "512599"]
+ADANIPORTS:
+  name: Adani Ports and SEZ
+  aliases: ["Adani Ports", "APSEZ", "Adani Ports & SEZ", "532921"]
+APOLLOHOSP:
+  name: Apollo Hospitals
+  aliases: ["Apollo Hospitals", "Apollo Hosp", "508869"]
+ASIANPAINT:
+  name: Asian Paints
+  aliases: ["Asian Paints", "500820"]
+AXISBANK:
+  name: Axis Bank
+  aliases: ["Axis Bank", "532215"]
+BAJAJ-AUTO:
+  name: Bajaj Auto
+  aliases: ["Bajaj Auto", "532977"]
+BAJAJFINSV:
+  name: Bajaj Finserv
+  aliases: ["Bajaj Finserv", "532978"]
+BAJFINANCE:
+  name: Bajaj Finance
+  aliases: ["Bajaj Finance", "500034"]
+BHARTIARTL:
+  name: Bharti Airtel
+  aliases: ["Bharti Airtel", "Airtel", "532454"]
+BPCL:
+  name: Bharat Petroleum
+  aliases: ["BPCL", "Bharat Petroleum", "Bharat Petroleum Corporation", "500547"]
+BRITANNIA:
+  name: Britannia Industries
+  aliases: ["Britannia", "Britannia Industries", "500825"]
+CIPLA:
+  name: Cipla
+  aliases: ["Cipla", "500087"]
+COALINDIA:
+  name: Coal India
+  aliases: ["Coal India", "CIL", "533278"]
+DIVISLAB:
+  name: Divi's Laboratories
+  aliases: ["Divi's Labs", "Divis Labs", "Divi's Laboratories", "532488"]
+DRREDDY:
+  name: Dr. Reddy's Laboratories
+  aliases: ["Dr Reddy's", "Dr Reddy", "DRL", "Dr. Reddy's Laboratories", "500124"]
+EICHERMOT:
+  name: Eicher Motors
+  aliases: ["Eicher Motors", "Eicher", "Royal Enfield", "505200"]
+GRASIM:
+  name: Grasim Industries
+  aliases: ["Grasim", "Grasim Industries", "500300"]
+HCLTECH:
+  name: HCL Technologies
+  aliases: ["HCL Tech", "HCL Technologies", "HCLTech", "532281"]
+HDFCBANK:
+  name: HDFC Bank
+  aliases: ["HDFC Bank", "500180"]
+HDFCLIFE:
+  name: HDFC Life Insurance
+  aliases: ["HDFC Life", "HDFC Life Insurance", "540777"]
+HEROMOTOCO:
+  name: Hero MotoCorp
+  aliases: ["Hero MotoCorp", "Hero Moto", "500182"]
+HINDALCO:
+  name: Hindalco Industries
+  aliases: ["Hindalco", "500440"]
+HINDUNILVR:
+  name: Hindustan Unilever
+  aliases: ["HUL", "Hindustan Unilever", "Hind Unilever", "500696"]
+ICICIBANK:
+  name: ICICI Bank
+  aliases: ["ICICI Bank", "532174"]
+INDUSINDBK:
+  name: IndusInd Bank
+  aliases: ["IndusInd Bank", "IndusInd", "532187"]
+INFY:
+  name: Infosys
+  aliases: ["Infosys", "Infy", "500209"]
+ITC:
+  name: ITC
+  aliases: ["ITC", "ITC Ltd", "500875"]
+JSWSTEEL:
+  name: JSW Steel
+  aliases: ["JSW Steel", "JSW", "500228"]
+KOTAKBANK:
+  name: Kotak Mahindra Bank
+  aliases: ["Kotak Mahindra Bank", "Kotak Bank", "Kotak Mahindra", "500247"]
+LT:
+  name: Larsen & Toubro
+  aliases: ["L&T", "Larsen & Toubro", "Larsen and Toubro", "500510"]
+LTIM:
+  name: LTIMindtree
+  aliases: ["LTIMindtree", "LTI Mindtree", "Mindtree", "540005"]
+M&M:
+  name: Mahindra & Mahindra
+  aliases: ["Mahindra & Mahindra", "M&M", "Mahindra and Mahindra", "500520"]
+MARUTI:
+  name: Maruti Suzuki
+  aliases: ["Maruti Suzuki", "Maruti", "532500"]
+NESTLEIND:
+  name: Nestle India
+  aliases: ["Nestle India", "Nestle", "500790"]
+NTPC:
+  name: NTPC
+  aliases: ["NTPC", "NTPC Ltd", "532555"]
+ONGC:
+  name: Oil and Natural Gas Corporation
+  aliases: ["ONGC", "Oil and Natural Gas", "Oil & Natural Gas", "500312"]
+POWERGRID:
+  name: Power Grid Corporation
+  aliases: ["Power Grid", "PowerGrid", "Power Grid Corporation", "532898"]
+RELIANCE:
+  name: Reliance Industries
+  aliases: ["Reliance", "Reliance Industries", "RIL", "Reliance Inds", "500325"]
+SBILIFE:
+  name: SBI Life Insurance
+  aliases: ["SBI Life", "SBI Life Insurance", "540719"]
+SBIN:
+  name: State Bank of India
+  aliases: ["SBI", "State Bank of India", "State Bank", "500112"]
+SHRIRAMFIN:
+  name: Shriram Finance
+  aliases: ["Shriram Finance", "Shriram Transport", "511218"]
+SUNPHARMA:
+  name: Sun Pharmaceutical
+  aliases: ["Sun Pharma", "Sun Pharmaceutical", "Sun Pharmaceuticals", "524715"]
+TATACONSUM:
+  name: Tata Consumer Products
+  aliases: ["Tata Consumer", "Tata Consumer Products", "500800"]
+TATAMOTORS:
+  name: Tata Motors
+  aliases: ["Tata Motors", "500570"]
+TATASTEEL:
+  name: Tata Steel
+  aliases: ["Tata Steel", "500470"]
+TCS:
+  name: Tata Consultancy Services
+  aliases: ["TCS", "Tata Consultancy", "Tata Consultancy Services", "532540"]
+TECHM:
+  name: Tech Mahindra
+  aliases: ["Tech Mahindra", "TechM", "532755"]
+TITAN:
+  name: Titan Company
+  aliases: ["Titan Company", "Titan Co", "500114"]
+ULTRACEMCO:
+  name: UltraTech Cement
+  aliases: ["UltraTech Cement", "UltraTech", "532538"]
+UPL:
+  name: UPL Limited
+  aliases: ["UPL", "UPL Ltd", "512070"]
+WIPRO:
+  name: Wipro
+  aliases: ["Wipro", "507685"]

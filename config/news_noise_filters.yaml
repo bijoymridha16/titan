@@ -1,0 +1,23 @@
+# Headlines matching these patterns are classified `block_deal` or `other`
+# and never fire signals. Curated 2026-06 from observed Indian-market news.
+
+block_deal_patterns:
+  - "block deal"
+  - "bulk deal"
+  - "stake sale via block"
+  - "large trade"
+  - "off-market deal"
+
+generic_noise_patterns:
+  - "informed the exchange"           # NSE filings boilerplate
+  - "intimation under regulation"
+  - "regulation 30"
+  - "regulation 23"
+  - "outcome of board meeting"        # neutral procedural
+  - "trading window closure"
+  - "notice of annual general meeting"
+  - "agm notice"
+  - "appointment of statutory auditor"
+  - "resignation of company secretary"
+  - "compliance certificate"
+  - "newspaper publication"
