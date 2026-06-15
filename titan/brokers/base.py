@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Optional
 
@@ -48,7 +48,7 @@ class Order:
     broker_order_id: Optional[str] = None
     status: OrderStatus = OrderStatus.NEW
     avg_fill_price: Optional[float] = None
-    placed_at: datetime = field(default_factory=datetime.utcnow)
+    placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     filled_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
     is_paper: bool = True

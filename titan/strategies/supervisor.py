@@ -49,6 +49,8 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "tsmom": TSMOM,
 }
 
+NON_TRADABLE_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+
 # subscribe to (universe × timeframe used by strategies). 5m for intraday;
 # 1d for TSMOM. Bar writer needs to publish bars:<symbol>:1d on daily close.
 TIMEFRAMES = {"5m", "1d"}
@@ -72,10 +74,14 @@ class Supervisor:
     def __init__(self):
         self.r = aioredis.from_url(settings.redis_url, decode_responses=True)
         self.limits = RiskLimits.from_settings()
+        # Reconstruct equity from realized PnL so restarts don't reset to capital.
+        realized = self._realized_pnl_total()
+        current = settings.capital + realized
+        peak = self._peak_equity_seen(default=current)
         self.state = RiskState(
             starting_equity=settings.capital,
-            peak_equity=settings.capital,
-            current_equity=settings.capital,
+            peak_equity=peak,
+            current_equity=current,
         )
         # one PaperBroker shared (per-symbol LTP from Redis)
         self.broker = PaperBroker(
@@ -117,8 +123,10 @@ class Supervisor:
 
         # active strategy instances keyed by (name, symbol)
         self.strategies: dict[tuple[str, str], Strategy] = {}
-        # open trades by (strategy, symbol)
-        self.open_trades: dict[tuple[str, str], OpenTrade] = {}
+        # open trades by (strategy, symbol) — reload from DB so restarts
+        # don't lose track of in-flight positions
+        self.open_trades: dict[tuple[str, str], OpenTrade] = self._load_open_trades()
+        self.state.open_positions = len(self.open_trades)
         self._ltp_cache: dict[str, float] = {}
 
     # ─────────────── helpers ───────────────
@@ -151,6 +159,49 @@ class Supervisor:
             """), {"id": t.id, "strat": t.strategy, "sym": t.symbol,
                    "qty": t.qty, "side": t.side.value, "ets": t.entry_ts,
                    "ep": t.entry_price, "sl": t.stop, "tg": t.target})
+
+    def _load_open_trades(self) -> dict[tuple[str, str], OpenTrade]:
+        out: dict[tuple[str, str], OpenTrade] = {}
+        try:
+            with engine().begin() as cx:
+                rows = cx.execute(text("""
+                    SELECT id, strategy, symbol, side, qty, entry_price,
+                           stop_loss, target, entry_ts
+                    FROM trades WHERE exit_ts IS NULL
+                """)).all()
+            for r in rows:
+                side = OrderSide(r.side) if r.side in ("BUY", "SELL") else (
+                    OrderSide.BUY if r.side == "LONG" else OrderSide.SELL
+                )
+                out[(r.strategy, r.symbol)] = OpenTrade(
+                    id=str(r.id), strategy=r.strategy, symbol=r.symbol,
+                    side=side, qty=int(r.qty),
+                    entry_price=float(r.entry_price),
+                    stop=float(r.stop_loss) if r.stop_loss is not None else 0.0,
+                    target=float(r.target) if r.target is not None else None,
+                    entry_ts=r.entry_ts,
+                )
+        except Exception as e:
+            log.warning("could not reload open trades: %s", e)
+        return out
+
+    def _realized_pnl_total(self) -> float:
+        try:
+            with engine().begin() as cx:
+                row = cx.execute(text(
+                    "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+                )).scalar()
+            return float(row or 0.0)
+        except Exception:
+            return 0.0
+
+    def _peak_equity_seen(self, default: float) -> float:
+        try:
+            with engine().begin() as cx:
+                row = cx.execute(text("SELECT MAX(equity) FROM equity_curve")).scalar()
+            return float(row) if row is not None else default
+        except Exception:
+            return default
 
     def _persist_close(self, t: OpenTrade, exit_ts: datetime,
                        exit_price: float, exit_reason: str, pnl: float) -> None:
@@ -196,12 +247,14 @@ class Supervisor:
             for sig in sigs:
                 if sig.kind == SignalKind.EXIT:
                     continue  # exits handled by SL/TP block above
+                if sig.symbol in NON_TRADABLE_INDICES:
+                    continue  # indices used as regime input only; trade ETFs at this capital
                 if (name, symbol) in self.open_trades:
                     continue  # one position per (strategy, symbol)
                 await self._open_position(name, sig)
 
             await self.r.set(f"titan:heartbeat:{name}",
-                             datetime.utcnow().isoformat())
+                             datetime.now(timezone.utc).isoformat())
 
     async def _open_position(self, strategy_name: str, sig: Signal) -> None:
         res = await self.router.submit(sig, strategy_name)

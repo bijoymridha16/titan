@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import socket
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -225,7 +225,7 @@ class AngelOneBroker(BrokerAdapter):
         order.broker_order_id = data.get("orderid")
         order.is_paper = False
         order.status = OrderStatus.OPEN  # confirmation via order book poll
-        order.placed_at = datetime.utcnow()
+        order.placed_at = datetime.now(timezone.utc)
         log.info("LIVE ORDER PLACED %s → angel_id=%s %s %s qty=%d",
                  order.id, order.broker_order_id, order.side.value,
                  order.symbol, order.qty)
@@ -235,7 +235,7 @@ class AngelOneBroker(BrokerAdapter):
         if fill:
             order.status = OrderStatus(fill["status"])
             order.avg_fill_price = fill["avg_price"]
-            order.filled_at = datetime.utcnow()
+            order.filled_at = datetime.now(timezone.utc)
         return order
 
     async def cancel_order(self, broker_order_id: str,
@@ -273,9 +273,9 @@ class AngelOneBroker(BrokerAdapter):
     async def _poll_fill(self, broker_order_id: str, timeout_s: float = 8.0):
         """Poll order book until status terminal or timeout. Returns dict or None."""
         import asyncio
-        deadline = datetime.utcnow() + timedelta(seconds=timeout_s)
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_s)
         terminal = {"complete", "rejected", "cancelled"}
-        while datetime.utcnow() < deadline:
+        while datetime.now(timezone.utc) < deadline:
             try:
                 r = self._client.get(ORDER_BOOK_PATH,
                                      headers=self._auth_headers(), timeout=5.0)
@@ -325,11 +325,11 @@ class AngelOneBroker(BrokerAdapter):
         self._jwt = body["jwtToken"]
         self._refresh = body["refreshToken"]
         self._feed_token = body["feedToken"]
-        self._expires_at = datetime.utcnow() + timedelta(hours=22)
+        self._expires_at = datetime.now(timezone.utc) + timedelta(hours=22)
         log.info("angelone: login OK, jwt expires ~%s", self._expires_at.isoformat())
 
     def _ensure_token(self) -> None:
-        if not self._jwt or (self._expires_at and datetime.utcnow() >= self._expires_at):
+        if not self._jwt or (self._expires_at and datetime.now(timezone.utc) >= self._expires_at):
             self._login_sync()
 
     def _login_headers(self, c: httpx.Client) -> dict[str, str]:
