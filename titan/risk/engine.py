@@ -82,7 +82,7 @@ class RiskEngine:
     # ---------- public ----------
 
     def check(self, order: Order, per_unit_risk: float, available_cash: float) -> RiskDecision:
-        for check in (
+        sticky_checks = (
             self._check_kill,
             self._check_session_halt,
             self._check_cutoff,
@@ -90,12 +90,20 @@ class RiskEngine:
             self._check_weekly_loss,
             self._check_drawdown,
             self._check_consecutive_losses,
+        )
+        transient_checks = (
             self._check_concurrent_positions,
-        ):
+        )
+        for check in sticky_checks:
             dec = check(order)
             if not dec.approved:
-                self.state.halted_today = True
-                self.state.halt_reason = dec.reason
+                if check is not self._check_session_halt:
+                    self.state.halted_today = True
+                    self.state.halt_reason = dec.reason
+                return dec
+        for check in transient_checks:
+            dec = check(order)
+            if not dec.approved:
                 return dec
 
         # per-trade risk

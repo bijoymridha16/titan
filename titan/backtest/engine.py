@@ -182,6 +182,11 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                     ex_px, reason = open_trade.stop, "stop"
                 elif open_trade.target and h >= open_trade.target:
                     ex_px, reason = open_trade.target, "target"
+            else:  # SHORT
+                if h >= open_trade.stop:
+                    ex_px, reason = open_trade.stop, "stop"
+                elif open_trade.target and l <= open_trade.target:
+                    ex_px, reason = open_trade.target, "target"
             if ex_px is not None:
                 _close_trade(open_trade, bar.name, ex_px, reason, slippage_bps)
                 equity += open_trade.pnl_net
@@ -204,7 +209,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                 res.trades.append(open_trade)
                 open_trade = None
                 break
-            if sig.kind == SignalKind.ENTRY_LONG and open_trade is None:
+            if sig.kind in (SignalKind.ENTRY_LONG, SignalKind.ENTRY_SHORT) and open_trade is None:
                 # size by risk: at most max_position_pct of equity, also bounded
                 # by per-trade risk (1% of equity) / per-unit risk
                 per_unit = sig.per_unit_risk
@@ -212,13 +217,17 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                 qty_risk = int(risk_budget / per_unit) if per_unit > 0 else 0
                 qty_pos = int((equity * max_position_pct) / sig.entry)
                 qty = max(1, min(qty_risk, qty_pos))
-                # fill at NEXT bar open (no look-ahead)
-                fill_px = float(next_bar["o"]) * (1 + slippage_bps / 1e4)
+                # fill at NEXT bar open (no look-ahead). LONG pays the spread up,
+                # SHORT receives the spread down.
+                is_long = sig.kind == SignalKind.ENTRY_LONG
+                fill_px = float(next_bar["o"]) * (
+                    1 + slippage_bps / 1e4 if is_long else 1 - slippage_bps / 1e4
+                )
                 open_trade = BTTrade(
                     symbol=strategy.symbol,
                     entry_ts=next_bar.name,
                     exit_ts=None,
-                    side="LONG", qty=qty,
+                    side="LONG" if is_long else "SHORT", qty=qty,
                     entry_px=fill_px, exit_px=None,
                     stop=sig.stop, target=sig.target,
                 )
