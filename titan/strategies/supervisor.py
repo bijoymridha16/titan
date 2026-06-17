@@ -20,6 +20,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 import pandas as pd
 import redis as _redis_sync
@@ -92,8 +95,6 @@ class Supervisor:
         # In synth mode the wall-clock is past the 15:15 cutoff, which would
         # block every order. Override the engine's clock to a mid-session IST
         # time so the rest of the risk checks still apply normally.
-        from zoneinfo import ZoneInfo
-        IST = ZoneInfo("Asia/Kolkata")
         def synth_or_real_now():
             try:
                 if self.r_sync.get("titan:mode:synthetic") == "1":
@@ -349,12 +350,108 @@ class Supervisor:
                 except Exception as e:
                     log.warning("shadow exit failed: %s", e)
 
+    async def _flatten_all(self, reason: str) -> int:
+        """Close every open position at current LTP. Returns count closed.
+
+        Reason is persisted as exit_reason. Used by:
+          - _eod_scheduler  → reason="eod_flatten"
+          - _control_loop FLATTEN message → reason="manual_flatten"
+        """
+        if not self.open_trades:
+            return 0
+        await self._refresh_ltps()
+        ts = datetime.now(timezone.utc)
+        closed = 0
+        for key, t in list(self.open_trades.items()):
+            ltp = self._ltp_sync(t.symbol)
+            if ltp <= 0:
+                log.warning("flatten: no LTP for %s, skipping", t.symbol)
+                continue
+            close_side = OrderSide.SELL if t.side == OrderSide.BUY else OrderSide.BUY
+            try:
+                await self.broker.place_order(Order(
+                    symbol=t.symbol, side=close_side, qty=t.qty,
+                    order_type=OrderType.MARKET, product=Product.INTRADAY,
+                    price=ltp, strategy=t.strategy,
+                ))
+            except Exception as e:
+                log.exception("flatten: broker exit failed for %s: %s", t.symbol, e)
+                continue
+            sign = 1 if t.side == OrderSide.BUY else -1
+            pnl = (ltp - t.entry_price) * t.qty * sign
+            self.state.on_trade_closed(pnl)
+            try:
+                await self.r.set("titan:consec_losses",
+                                 str(self.state.consecutive_losses))
+            except Exception:
+                pass
+            self._persist_close(t, ts, ltp, reason, pnl)
+            del self.open_trades[key]
+            self.state.open_positions = len(self.open_trades)
+            closed += 1
+            log.info("FLATTEN %s %s @ %.2f  %s  pnl=%+.2f  eq=%.2f",
+                     t.strategy, t.symbol, ltp, reason, pnl,
+                     self.state.current_equity)
+        return closed
+
+    # ─────────────── background loops ───────────────
+    async def _control_loop(self):
+        """Consume titan:control channel (FLATTEN published by API /flatten)."""
+        pubsub = self.r.pubsub()
+        await pubsub.subscribe("titan:control")
+        log.info("supervisor subscribed to titan:control")
+        while True:
+            try:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=5.0)
+            except (asyncio.TimeoutError, _redis_sync.exceptions.TimeoutError):
+                continue
+            if not msg:
+                continue
+            data = msg.get("data")
+            if data == "FLATTEN":
+                log.info("control: FLATTEN received")
+                try:
+                    n = await self._flatten_all("manual_flatten")
+                    log.info("control: flattened %d positions", n)
+                except Exception as e:
+                    log.exception("control: flatten failed: %s", e)
+
+    async def _eod_scheduler(self):
+        """Sleep until intraday_square_off IST, then publish FLATTEN.
+
+        Going through the control channel (not calling _flatten_all directly)
+        means scheduled and manual flatten share one code path.
+        """
+        cutoff = settings.intraday_square_off  # time(15, 15) by default
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=cutoff.hour, minute=cutoff.minute,
+                                 second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            wait_s = (target - now).total_seconds()
+            log.info("eod scheduler: next flatten at %s IST (in %.0fs)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_s)
+            try:
+                await asyncio.sleep(wait_s)
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self.r.publish("titan:control", "FLATTEN")
+                log.info("eod scheduler: published FLATTEN at %s IST",
+                         datetime.now(IST).strftime("%H:%M:%S"))
+            except Exception as e:
+                log.exception("eod scheduler: publish failed: %s", e)
+            # avoid double-fire within same minute
+            await asyncio.sleep(60)
+
     # ─────────────── entrypoint ───────────────
-    async def run(self):
+    async def _bar_loop(self):
         pubsub = self.r.pubsub()
         channels = [f"bars:{s}:{tf}" for s in settings.symbols for tf in TIMEFRAMES]
         await pubsub.subscribe(*channels)
-        log.info("supervisor subscribed to %d channels", len(channels))
+        log.info("supervisor subscribed to %d bar channels", len(channels))
         while True:
             try:
                 msg = await pubsub.get_message(
@@ -373,6 +470,13 @@ class Supervisor:
                 await self._on_bar_event(symbol, tf, bar)
             except Exception as e:
                 log.exception("on_bar_event failed: %s", e)
+
+    async def run(self):
+        await asyncio.gather(
+            self._bar_loop(),
+            self._control_loop(),
+            self._eod_scheduler(),
+        )
 
 
 def main():
