@@ -1,0 +1,24 @@
+# NSE trading-holiday calendar (YYYY-MM-DD).
+#
+# The market-hours gate (titan/clock.py) treats these dates as CLOSED, in
+# addition to weekends. This prevents the system from "trading" (even on paper
+# during real-data runs) on days the exchange is shut.
+#
+# ⚠️ THIS LIST IS INCOMPLETE BY DESIGN. Only the fixed-date national holidays NSE
+# always observes are pre-filled below (these are date-certain). The full annual
+# calendar includes many MOVABLE festival dates (Holi, Mahashivratri, Eid,
+# Diwali/Muhurat, etc.) that change each year — DO NOT guess them. Copy the
+# official list from the NSE holiday circular for the relevant year:
+#   https://www.nseindia.com/  → Resources → Trading Holidays
+# Leaving a year's movable dates out only means the gate is too permissive on
+# those days; it never blocks a real trading day incorrectly.
+
+holidays:
+  # — fixed-date national holidays (NSE-observed) —
+  - 2026-01-26   # Republic Day
+  - 2026-08-15   # Independence Day
+  - 2026-10-02   # Gandhi Jayanti
+  # — movable festival holidays for 2026: ADD FROM OFFICIAL NSE CIRCULAR —
+  # - 2026-MM-DD  # Holi
+  # - 2026-MM-DD  # Diwali / Laxmi Pujan (special Muhurat session may apply)
+  # - ...

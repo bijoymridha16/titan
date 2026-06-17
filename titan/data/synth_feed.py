@@ -11,8 +11,8 @@ Writes:
 Behavior:
   - Generates 1 tick every 0.2s per symbol — fast enough to fill 5m bars within
     a minute of wall-clock so strategies start producing signals immediately.
-  - Time-axis is FAKE: each tick advances simulated time by 30s. So 12 ticks =
-    1 simulated minute. This is what makes the 5m bars close in ~10 real seconds.
+  - Time-axis is FAKE: each tick advances simulated time by 30s. So 2 ticks =
+    1 simulated minute, and a 5m bar (10 ticks) closes in ~2 real seconds.
   - Random walk anchored at realistic NSE prices; small chance of a "shock" leg
     each minute so ORB / Supertrend get something to bite on.
 

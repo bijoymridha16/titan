@@ -27,6 +27,8 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "pytz>=2024.1",
     "click>=8.1",
+    "streamlit-autorefresh>=1.0",   # dashboard 5s auto-refresh (titan/dashboard/app.py)
+    "rapidfuzz>=3.0",               # news entity fuzzy-matching (titan/news/entities.py)
 ]
 
 [project.optional-dependencies]

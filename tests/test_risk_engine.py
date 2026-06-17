@@ -12,6 +12,7 @@ def make_limits(**overrides) -> RiskLimits:
         capital=500_000.0,
         max_risk_per_trade_pct=1.0,
         max_daily_loss_pct=2.0,
+        max_daily_profit_pct=4.0,
         max_weekly_loss_pct=5.0,
         max_drawdown_pct=10.0,
         max_consecutive_losses=3,
@@ -62,12 +63,74 @@ def test_pre_market_blocks(ist_now_factory):
     assert not dec.approved
 
 
+def _weekend_now():
+    # 2026-06-13 is a Saturday, mid-session time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return lambda: datetime(2026, 6, 13, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+
+def test_market_closed_weekend_blocks_in_real_mode():
+    eng = RiskEngine(make_limits(), make_state(), now_fn=_weekend_now())
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "market closed" in dec.reason
+
+
+def test_market_closed_after_hours_blocks(ist_now_factory):
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(16, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "market closed" in dec.reason
+
+
+def test_market_closed_is_not_sticky(ist_now_factory):
+    # A 'market closed' rejection must NOT permanently halt the day (transient).
+    eng = RiskEngine(make_limits(), make_state(), now_fn=ist_now_factory(16, 0))
+    eng.check(order(), per_unit_risk=2.0, available_cash=500_000)  # rejected, closed
+    assert eng.state.halted_today is False        # not sticky
+    eng._now = ist_now_factory(10, 0)             # later, market open again
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert dec.approved                            # trades resume
+
+
+def test_sim_mode_bypasses_market_hours(ist_now_factory):
+    # explicit simulation: time gates relaxed even at 4pm / weekend
+    eng = RiskEngine(make_limits(), make_state(),
+                     now_fn=ist_now_factory(16, 0), sim_mode_fn=lambda: True)
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert dec.approved
+
+
 def test_daily_loss_cap(ist_now_factory):
     s = make_state(realized_pnl_today=-10_000.0)  # cap is 2% of 5L = 10k
     eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
     dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
     assert not dec.approved
     assert "daily loss" in dec.reason
+
+
+def test_daily_profit_lock(ist_now_factory):
+    # target is 4% of 5L = 20k. Once realized today >= 20k, lock new entries.
+    s = make_state(realized_pnl_today=20_000.0)
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not dec.approved
+    assert "profit target" in dec.reason
+
+
+def test_daily_profit_lock_disabled_when_pct_zero(ist_now_factory):
+    s = make_state(realized_pnl_today=50_000.0)  # way past any target
+    eng = RiskEngine(make_limits(max_daily_profit_pct=0.0), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert dec.approved  # lock disabled → profits don't halt trading
+
+
+def test_below_profit_target_still_trades(ist_now_factory):
+    s = make_state(realized_pnl_today=19_999.0)  # just under 20k target
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert dec.approved
 
 
 def test_drawdown_cap(ist_now_factory):
@@ -117,6 +180,16 @@ def test_session_halt_is_sticky(ist_now_factory):
     dec = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
     assert not dec.approved
     assert "halted" in dec.reason
+
+
+def test_halt_reason_does_not_compound(ist_now_factory):
+    # once halted, repeated checks must NOT keep prefixing "session halted: …"
+    s = make_state(realized_pnl_today=-10_000.0)  # daily loss cap
+    eng = RiskEngine(make_limits(), s, now_fn=ist_now_factory(10, 0))
+    for _ in range(5):
+        eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert eng.state.halt_reason.count("session halted") <= 1
+    assert "daily loss" in eng.state.halt_reason
 
 
 def test_state_on_trade_closed_loss_increments_consec():

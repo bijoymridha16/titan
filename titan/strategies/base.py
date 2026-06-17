@@ -29,7 +29,7 @@ class Signal:
     stop: float
     target: Optional[float] = None
     reason: str = ""
-    confidence: float = 1.0  # [0, 1] — for analytics, not for sizing
+    confidence: float = 1.0  # (0,1] conviction — scales position size (clamped 0.1–1.0)
 
     @property
     def per_unit_risk(self) -> float:

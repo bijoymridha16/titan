@@ -26,6 +26,7 @@ import redis as _redis_sync
 import redis.asyncio as aioredis
 from sqlalchemy import text
 
+from titan.analytics import recorder as rec
 from titan.brokers.angelone import AngelOneBroker
 from titan.brokers.base import Order, OrderSide, OrderStatus, OrderType, Product
 from titan.brokers.paper import PaperBroker
@@ -35,24 +36,25 @@ from titan.execution.router import ExecutionRouter
 from titan.risk.engine import RiskEngine, RiskState
 from titan.risk.limits import RiskLimits
 from titan.strategies.base import Signal, SignalKind, Strategy
-from titan.strategies.orb import OpeningRangeBreakout
-from titan.strategies.supertrend_adx import SupertrendADX
-from titan.strategies.tsmom import TSMOM
-from titan.strategies.vwap_revert import VWAPRevert
+from titan.strategies.registry import BASE_STRATEGIES as STRATEGIES
 
 log = logging.getLogger(__name__)
-
-STRATEGIES: dict[str, type[Strategy]] = {
-    "orb": OpeningRangeBreakout,
-    "vwap_revert": VWAPRevert,
-    "supertrend_adx": SupertrendADX,
-    "tsmom": TSMOM,
-}
 
 # subscribe to (universe × timeframe used by strategies). 5m for intraday;
 # 1d for TSMOM. Bar writer needs to publish bars:<symbol>:1d on daily close.
 TIMEFRAMES = {"5m", "1d"}
 WINDOW_BARS = 200
+
+
+def _to_utc(ts) -> datetime:
+    """Coerce a signal/bar timestamp (naive, IST-aware, or UTC) to tz-aware UTC,
+    so trade times share the same clock as the OHLCV candles they render on."""
+    try:
+        p = pd.Timestamp(ts)
+        p = p.tz_localize("UTC") if p.tzinfo is None else p.tz_convert("UTC")
+        return p.to_pydatetime()
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -66,6 +68,7 @@ class OpenTrade:
     stop: float
     target: Optional[float]
     entry_ts: datetime
+    regime: Optional[str] = None
 
 
 class Supervisor:
@@ -83,22 +86,18 @@ class Supervisor:
             ltp_provider=self._ltp_sync,
             slippage_bps=2.0,
         )
-        # In synth mode the wall-clock is past the 15:15 cutoff, which would
-        # block every order. Override the engine's clock to a mid-session IST
-        # time so the rest of the risk checks still apply normally.
-        from zoneinfo import ZoneInfo
-        IST = ZoneInfo("Asia/Kolkata")
-        def synth_or_real_now():
-            try:
-                if self.r_sync.get("titan:mode:synthetic") == "1":
-                    return datetime.now(IST).replace(hour=11, minute=0,
-                                                     second=0, microsecond=0)
-            except Exception: pass
-            return datetime.now(IST)
-        # sync redis client for synchronous risk-engine clock check
+        # Honest clock: the risk engine always sees the truth (real IST in real
+        # mode, an explicit labeled simulation clock only when sim_mode is on).
+        # No silent "pretend it's 11am" override — the market-hours gate decides
+        # whether trading is allowed, and simulation must be opted into.
         import redis as _redis_sync
+        from titan import clock
         self.r_sync = _redis_sync.from_url(settings.redis_url, decode_responses=True)
-        self.risk = RiskEngine(self.limits, self.state, now_fn=synth_or_real_now)
+        self.risk = RiskEngine(
+            self.limits, self.state,
+            now_fn=lambda: clock.trading_now(self.r_sync),
+            sim_mode_fn=lambda: clock.sim_mode(self.r_sync),
+        )
         self.router = ExecutionRouter(self.broker, self.risk, lot_size=1)
 
         # ─── shadow live broker (paper+dry-run parallel rehearsal) ───
@@ -146,11 +145,12 @@ class Supervisor:
         with engine().begin() as cx:
             cx.execute(text("""
                 INSERT INTO trades (id, strategy, symbol, qty, side, entry_ts,
-                                    entry_price, stop_loss, target, is_paper)
-                VALUES (:id, :strat, :sym, :qty, :side, :ets, :ep, :sl, :tg, true)
+                                    entry_price, stop_loss, target, regime, is_paper)
+                VALUES (:id, :strat, :sym, :qty, :side, :ets, :ep, :sl, :tg, :rg, true)
             """), {"id": t.id, "strat": t.strategy, "sym": t.symbol,
                    "qty": t.qty, "side": t.side.value, "ets": t.entry_ts,
-                   "ep": t.entry_price, "sl": t.stop, "tg": t.target})
+                   "ep": t.entry_price, "sl": t.stop, "tg": t.target,
+                   "rg": t.regime})
 
     def _persist_close(self, t: OpenTrade, exit_ts: datetime,
                        exit_price: float, exit_reason: str, pnl: float) -> None:
@@ -193,27 +193,111 @@ class Supervisor:
             except Exception as e:
                 log.exception("%s.on_bar(%s) failed: %s", name, symbol, e)
                 continue
+            regime = await self.r.get("titan:regime:current")
+            last = window.iloc[-1]
+            features = {"o": float(last["o"]), "h": float(last["h"]),
+                        "l": float(last["l"]), "c": float(last["c"]),
+                        "v": float(last["v"]), "window_bars": int(len(window))}
             for sig in sigs:
+                # capture EVERY signal — including the ones we don't act on
                 if sig.kind == SignalKind.EXIT:
-                    continue  # exits handled by SL/TP block above
+                    # M2: honour strategy-driven exits (e.g. TSMOM trend flip,
+                    # Supertrend flip). Close the open position at the bar close.
+                    ot = self.open_trades.get((name, symbol))
+                    if ot is not None:
+                        self._record_signal(name, sig, regime, accepted=True,
+                                            reject_reason=None, features=features)
+                        await self._close_trade(ot, float(last["c"]), "signal_exit",
+                                                _to_utc(sig.ts))
+                    else:
+                        self._record_signal(name, sig, regime, accepted=False,
+                                            reject_reason="exit but no open position",
+                                            features=features)
+                    continue
                 if (name, symbol) in self.open_trades:
-                    continue  # one position per (strategy, symbol)
-                await self._open_position(name, sig)
+                    self._record_signal(name, sig, regime, accepted=False,
+                                        reject_reason="position already open", features=features)
+                    continue
+                await self._open_position(name, sig, regime, features)
 
             await self.r.set(f"titan:heartbeat:{name}",
                              datetime.utcnow().isoformat())
 
-    async def _open_position(self, strategy_name: str, sig: Signal) -> None:
+        await self._publish_session_state()
+
+    async def _publish_session_state(self) -> None:
+        """Surface risk-engine session state to Redis so the dashboard can show
+        the true halt status (loss-halt vs profit-lock vs active)."""
+        try:
+            await self.r.set("titan:session:realized_pnl",
+                             f"{self.state.realized_pnl_today:.2f}")
+            if self.state.halted_today:
+                await self.r.set("titan:session:status", "HALTED")
+                await self.r.set("titan:session:reason",
+                                 self.state.halt_reason or "halted")
+            else:
+                await self.r.set("titan:session:status", "ACTIVE")
+                await self.r.set("titan:session:reason", "")
+        except Exception:
+            pass
+
+    def _record_signal(self, strategy_name: str, sig: Signal, regime,
+                       accepted: bool, reject_reason, features: dict,
+                       order_id=None) -> str:
+        """Persist a signal (accepted or not) + its feature snapshot. Best-effort."""
+        sid = rec.new_id()
+        rec.record_signal(
+            signal_id=sid, strategy=strategy_name, symbol=sig.symbol,
+            kind=sig.kind.value, entry=sig.entry, stop=sig.stop, target=sig.target,
+            per_unit_risk=sig.per_unit_risk, confidence=sig.confidence,
+            regime=regime, accepted=accepted, reject_reason=reject_reason,
+            order_id=order_id, reason=sig.reason,
+        )
+        rec.record_feature_snapshot(strategy=strategy_name, symbol=sig.symbol,
+                                    signal_id=sid, features=features)
+        return sid
+
+    async def _open_position(self, strategy_name: str, sig: Signal,
+                             regime=None, features: dict | None = None) -> None:
+        features = features or {}
         res = await self.router.submit(sig, strategy_name)
-        if not res.approved or not res.order or res.order.status != OrderStatus.FILLED:
+        order = res.order
+        side = OrderSide.BUY if sig.kind == SignalKind.ENTRY_LONG else OrderSide.SELL
+        filled = bool(res.approved and order and order.status == OrderStatus.FILLED)
+
+        # record the signal (accepted = it reached a fill) + the order attempt
+        oid = rec.new_id()
+        sid = self._record_signal(strategy_name, sig, regime, accepted=filled,
+                                  reject_reason=None if filled else res.reason,
+                                  features=features, order_id=oid if filled else None)
+        rec.record_order_attempt(
+            order_id=oid, signal_id=sid, strategy=strategy_name, symbol=sig.symbol,
+            side=side.value, qty_requested=(order.qty if order else None),
+            qty_final=(order.qty if order else None),
+            order_type="MARKET", product="INTRADAY",
+            price=sig.entry, risk_approved=bool(res.approved),
+            risk_reason=res.reason, broker="paper",
+            status=(order.status.value if order else "REJECTED"),
+            broker_order_id=(order.broker_order_id if order else None),
+            avg_fill_price=(order.avg_fill_price if order else None),
+            reject_reason=None if res.approved else res.reason,
+        )
+        if not filled:
             log.info("REJECT %s %s: %s", strategy_name, sig.symbol, res.reason)
             return
-        side = OrderSide.BUY if sig.kind == SignalKind.ENTRY_LONG else OrderSide.SELL
+        # realized-vs-modeled slippage on the entry fill
+        rec.record_fill(
+            order_id=oid, strategy=strategy_name, symbol=sig.symbol, side=side.value,
+            qty=order.qty, fill_price=order.avg_fill_price,
+            ltp_at_decision=self._ltp_cache.get(sig.symbol), modeled_slippage_bps=2.0,
+            is_paper=True,
+        )
         t = OpenTrade(
             id=str(uuid.uuid4()), strategy=strategy_name, symbol=sig.symbol,
             side=side, qty=res.order.qty,
             entry_price=res.order.avg_fill_price, stop=sig.stop, target=sig.target,
-            entry_ts=datetime.now(timezone.utc),
+            entry_ts=_to_utc(sig.ts),  # market/bar time, so it aligns with candles
+            regime=regime,
         )
         self.open_trades[(strategy_name, sig.symbol)] = t
         self._persist_open_trade(t)
@@ -244,7 +328,7 @@ class Supervisor:
 
     async def _check_exits(self, symbol: str, bar: dict) -> None:
         h = float(bar["h"]); l = float(bar["l"]); c = float(bar["c"])
-        ts = datetime.now(timezone.utc)
+        ts = _to_utc(bar["ts"]) if bar.get("ts") else datetime.now(timezone.utc)
         # iterate over a copy because we may mutate
         for key, t in list(self.open_trades.items()):
             if t.symbol != symbol:
@@ -258,43 +342,46 @@ class Supervisor:
                 elif t.target and l <= t.target: exit_price, reason = t.target, "target"
             if exit_price is None:
                 continue
-            # paper-execute the exit (opposite side, market)
-            close_side = OrderSide.SELL if t.side == OrderSide.BUY else OrderSide.BUY
-            o = await self.broker.place_order(Order(
-                symbol=t.symbol, side=close_side, qty=t.qty,
-                order_type=OrderType.MARKET, product=Product.INTRADAY,
-                price=exit_price, strategy=t.strategy,
-            ))
-            sign = 1 if t.side == OrderSide.BUY else -1
-            pnl = (exit_price - t.entry_price) * t.qty * sign
-            self.state.on_trade_closed(pnl)
-            await self.r.set("titan:consec_losses",
-                             str(self.state.consecutive_losses))
-            self._persist_close(t, ts, exit_price, reason, pnl)
-            del self.open_trades[key]
-            self.state.open_positions = len(self.open_trades)
-            log.info("CLOSE %s %s @ %.2f  %s  pnl=%+.2f  eq=%.2f",
-                     t.strategy, t.symbol, exit_price, reason, pnl,
-                     self.state.current_equity)
+            await self._close_trade(t, exit_price, reason, ts)
 
-            # shadow live exit
-            if self.shadow_broker is not None:
-                try:
-                    shadow_exit = Order(
-                        symbol=t.symbol, side=close_side, qty=t.qty,
-                        order_type=OrderType.MARKET, product=Product.INTRADAY,
-                        price=exit_price, strategy=t.strategy, is_paper=False,
-                    )
-                    if self.shadow_broker._jwt is None:
-                        await self.shadow_broker.connect()
-                    res = await self.shadow_broker.place_order(shadow_exit)
-                    tag = "SHADOW-DRY" if settings.live_dry_run else "SHADOW-LIVE"
-                    log.info("%s exit  %s %s qty=%d → %s (%s)",
-                             tag, t.symbol, close_side.value, t.qty,
-                             res.status.value,
-                             res.reject_reason or res.broker_order_id or "ok")
-                except Exception as e:
-                    log.warning("shadow exit failed: %s", e)
+    async def _close_trade(self, t: "OpenTrade", exit_price: float,
+                           reason: str, ts: datetime) -> None:
+        """Single exit path — used by SL/TP checks AND strategy EXIT signals (M2)."""
+        key = (t.strategy, t.symbol)
+        if key not in self.open_trades:
+            return
+        close_side = OrderSide.SELL if t.side == OrderSide.BUY else OrderSide.BUY
+        await self.broker.place_order(Order(
+            symbol=t.symbol, side=close_side, qty=t.qty,
+            order_type=OrderType.MARKET, product=Product.INTRADAY,
+            price=exit_price, strategy=t.strategy,
+        ))
+        sign = 1 if t.side == OrderSide.BUY else -1
+        pnl = (exit_price - t.entry_price) * t.qty * sign
+        self.state.on_trade_closed(pnl)
+        await self.r.set("titan:consec_losses", str(self.state.consecutive_losses))
+        self._persist_close(t, ts, exit_price, reason, pnl)
+        del self.open_trades[key]
+        self.state.open_positions = len(self.open_trades)
+        log.info("CLOSE %s %s @ %.2f  %s  pnl=%+.2f  eq=%.2f",
+                 t.strategy, t.symbol, exit_price, reason, pnl, self.state.current_equity)
+
+        if self.shadow_broker is not None:
+            try:
+                shadow_exit = Order(
+                    symbol=t.symbol, side=close_side, qty=t.qty,
+                    order_type=OrderType.MARKET, product=Product.INTRADAY,
+                    price=exit_price, strategy=t.strategy, is_paper=False,
+                )
+                if self.shadow_broker._jwt is None:
+                    await self.shadow_broker.connect()
+                res = await self.shadow_broker.place_order(shadow_exit)
+                tag = "SHADOW-DRY" if settings.live_dry_run else "SHADOW-LIVE"
+                log.info("%s exit  %s %s qty=%d → %s (%s)",
+                         tag, t.symbol, close_side.value, t.qty, res.status.value,
+                         res.reject_reason or res.broker_order_id or "ok")
+            except Exception as e:
+                log.warning("shadow exit failed: %s", e)
 
     # ─────────────── entrypoint ───────────────
     async def run(self):

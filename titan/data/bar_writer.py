@@ -20,7 +20,11 @@ from titan.data.aggregator import Bar, _bucket_start
 from titan.data.store import engine
 
 log = logging.getLogger(__name__)
-TIMEFRAMES = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
+# 1d included so daily-timeframe strategies (e.g. TSMOM) actually receive bars
+# (AUTOPSY_FINDINGS M1). NOTE: the 1d bucket aligns to UTC midnight, not the IST
+# session — close enough for daily-trend strategies; a session-aligned daily
+# roll-up is a future refinement.
+TIMEFRAMES = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1d": 86400}
 
 
 class _BucketState:
