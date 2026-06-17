@@ -11,14 +11,20 @@ Counterparty: the strategy passes a proposed Order plus the trade's
 per-unit risk (|entry - stop|). The engine validates against:
 
   1. Kill switch
-  2. Square-off cutoff (no new entries after 15:15 IST)
-  3. Daily loss cap
-  4. Weekly loss cap
-  5. Drawdown cap (from session-peak equity)
-  6. Consecutive losses
-  7. Concurrent positions
-  8. Per-trade risk cap
-  9. Funds available
+  2. Market hours (NSE open: 09:15–15:30 IST, Mon–Fri) — bypassed only in sim mode
+  3. Square-off cutoff (no new entries after 15:15 IST)
+  4. Daily loss cap
+  5. Daily profit target (profit-lock — stop trading once gains are booked)
+  6. Weekly loss cap
+  7. Drawdown cap (from session-peak equity)
+  8. Consecutive losses
+  9. Concurrent positions
+ 10. Per-trade risk cap
+ 11. Funds available
+
+The market-hours gate is what makes the system honest: in real mode it will not
+open a position when the exchange is closed. Simulation must be opted into
+explicitly (sim_mode), and only then are the time gates relaxed.
 
 All violations are logged to `risk_events` (Postgres) and emit a Telegram alert.
 """
@@ -74,28 +80,45 @@ class RiskDecision:
 
 
 class RiskEngine:
-    def __init__(self, limits: RiskLimits, state: RiskState, now_fn=lambda: datetime.now(IST)):
+    def __init__(self, limits: RiskLimits, state: RiskState,
+                 now_fn=lambda: datetime.now(IST), sim_mode_fn=lambda: False):
         self.limits = limits
         self.state = state
         self._now = now_fn
+        # callable so a live toggle (Redis/API) is reflected without rebuilding
+        # the engine. Accepts a bool too, for convenience in tests.
+        self._sim_mode_fn = sim_mode_fn if callable(sim_mode_fn) else (lambda: bool(sim_mode_fn))
+
+    @property
+    def sim_mode(self) -> bool:
+        return bool(self._sim_mode_fn())
 
     # ---------- public ----------
 
     def check(self, order: Order, per_unit_risk: float, available_cash: float) -> RiskDecision:
-        for check in (
-            self._check_kill,
-            self._check_session_halt,
-            self._check_cutoff,
-            self._check_daily_loss,
-            self._check_weekly_loss,
-            self._check_drawdown,
-            self._check_consecutive_losses,
-            self._check_concurrent_positions,
+        # (gate, sticky): sticky gates halt the rest of the trading day on a breach.
+        # Market-hours is TRANSIENT — "market closed" must not permanently halt the
+        # day (it reopens, and sim can be toggled), so it does not set halted_today.
+        for check, sticky in (
+            (self._check_kill, True),
+            (self._check_session_halt, True),
+            (self._check_market_hours, False),
+            (self._check_cutoff, True),
+            (self._check_daily_loss, True),
+            (self._check_daily_profit_lock, True),
+            (self._check_weekly_loss, True),
+            (self._check_drawdown, True),
+            (self._check_consecutive_losses, True),
+            (self._check_concurrent_positions, True),
         ):
             dec = check(order)
             if not dec.approved:
-                self.state.halted_today = True
-                self.state.halt_reason = dec.reason
+                # Only record the halt cause on the FIRST breach. Otherwise the
+                # session-halt check re-wraps its own message every bar
+                # ("session halted: session halted: …") and the reason balloons.
+                if sticky and not self.state.halted_today:
+                    self.state.halted_today = True
+                    self.state.halt_reason = dec.reason
                 return dec
 
         # per-trade risk
@@ -137,7 +160,25 @@ class RiskEngine:
             return RiskDecision(False, f"session halted: {self.state.halt_reason}")
         return RiskDecision(True)
 
+    def _check_market_hours(self, _: Order) -> RiskDecision:
+        """The honesty gate. In real mode, refuse to open a position when the NSE
+        cash market is closed (weekend, or outside 09:15–15:30 IST). Bypassed only
+        when simulation is explicitly enabled."""
+        if self.sim_mode:
+            return RiskDecision(True)
+        now = self._now()
+        if now.weekday() >= 5:
+            return RiskDecision(False, "market closed (weekend)")
+        now_t = now.timetz().replace(tzinfo=None)
+        if now_t < time(9, 15):
+            return RiskDecision(False, "market closed (pre-open)")
+        if now_t >= time(15, 30):
+            return RiskDecision(False, "market closed (after hours)")
+        return RiskDecision(True)
+
     def _check_cutoff(self, _: Order) -> RiskDecision:
+        if self.sim_mode:
+            return RiskDecision(True)
         now_t = self._now().timetz().replace(tzinfo=None)
         if now_t >= self.limits.intraday_square_off:
             return RiskDecision(False, f"past intraday cutoff {self.limits.intraday_square_off}")
@@ -148,6 +189,16 @@ class RiskEngine:
     def _check_daily_loss(self, _: Order) -> RiskDecision:
         if -self.state.realized_pnl_today >= self.limits.max_daily_loss_inr:
             return RiskDecision(False, "daily loss cap hit")
+        return RiskDecision(True)
+
+    def _check_daily_profit_lock(self, _: Order) -> RiskDecision:
+        """Profit-lock: once today's realized PnL reaches the target, stop opening
+        new positions to protect the gains. The positive mirror of the loss cap.
+        A pct of 0 disables the lock. Open positions still exit normally via SL/TP."""
+        if self.limits.max_daily_profit_pct <= 0:
+            return RiskDecision(True)
+        if self.state.realized_pnl_today >= self.limits.max_daily_profit_inr:
+            return RiskDecision(False, "daily profit target reached — gains locked")
         return RiskDecision(True)
 
     def _check_weekly_loss(self, _: Order) -> RiskDecision:

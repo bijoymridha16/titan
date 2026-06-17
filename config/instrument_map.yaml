@@ -1,0 +1,28 @@
+# Underlying → tradable instrument mapping (D1).
+#
+# Strategies signal on the UNDERLYING (NIFTY, SENSEX, a stock). What we actually
+# send to the broker depends on settings.instrument_kind:
+#   ETF     → the liquid index ETF on NSE cash (tradable at ₹5K).  [default]
+#   EQUITY  → the stock itself (for single-name signals).
+#   OPTION  → weekly ATM option (NFO/BFO) — routing layer is future work.
+#   INDEX   → the index itself: NOT directly tradable; paper-only validation.
+#
+# Only ETF/EQUITY are wired for real orders today; OPTION is documented-but-pending
+# (see docs/10_change_log.md). SENSEX is a BSE index → its ETF/options need BSE/BFO
+# enabled in TITAN_LIVE_ALLOWED_EXCHANGES before live.
+
+etf:
+  NIFTY:      NIFTYBEES      # Nippon NIFTY 50 ETF (NSE)
+  BANKNIFTY:  BANKBEES       # Nippon Nifty Bank ETF (NSE)
+  FINNIFTY:   NIFTYBEES      # no liquid FinNifty ETF — proxy to NIFTYBEES
+  SENSEX:     SENSEXBEES     # Nippon BSE Sensex ETF (NSE-listed)
+
+# index futures/option roots (for the future OPTION router)
+option_root:
+  NIFTY:      NIFTY
+  BANKNIFTY:  BANKNIFTY
+  FINNIFTY:   FINNIFTY
+  SENSEX:     SENSEX
+
+# single-name equities trade as themselves
+equity_passthrough: true

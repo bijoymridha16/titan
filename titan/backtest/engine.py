@@ -105,7 +105,8 @@ class BTResult:
             self.sharpe = float((rets.mean() / (rets.std() + 1e-12)) * math.sqrt(ann)) if len(rets) else 0.0
             days = max(1, len(eq))
             years = days / 252
-            self.cagr = float((eq[-1] / eq[0]) ** (1 / years) - 1) if years > 0 and eq[0] > 0 else 0.0
+            self.cagr = (float((eq[-1] / eq[0]) ** (1 / years) - 1)
+                         if years > 0 and eq[0] > 0 and eq[-1] > 0 else -1.0)
             # exposure = bars in a trade / total bars (rough proxy)
             held = sum(t.bars_held for t in self.trades)
             self.exposure_pct = float(min(1.0, held / max(1, days)) * 100)
@@ -155,9 +156,15 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                  starting_equity: float = 5000.0,
                  max_position_pct: float = 1.0,
                  warmup_bars: int = 60,
-                 slippage_bps: float = 5.0) -> BTResult:
-    """Event-loop backtest. Strategy emits ENTRY_LONG → fill at next bar open.
-    Exit on signal flip, SL, or TP."""
+                 slippage_bps: float = 5.0,
+                 window_bars: int = 250,
+                 leverage: float = 5.0) -> BTResult:
+    """Event-loop backtest. Strategy emits ENTRY_LONG/SHORT → fill at next bar open.
+    Exit on signal flip, SL, or TP.
+
+    `window_bars` bounds the trailing history handed to on_bar() each step — this
+    matches what the live supervisor does (it passes the last 200 bars) and keeps
+    the backtest O(n·window) instead of O(n²) on long series."""
     res = BTResult(symbol=strategy.symbol, starting_equity=starting_equity)
     if len(bars) < warmup_bars + 2:
         log.warning("not enough bars (%d) to backtest %s", len(bars), strategy.symbol)
@@ -167,8 +174,9 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
     equity_series: list[tuple[pd.Timestamp, float]] = []
     open_trade: Optional[BTTrade] = None
 
+    ruined = False
     for i in range(warmup_bars, len(bars) - 1):
-        window = bars.iloc[: i + 1]
+        window = bars.iloc[max(0, i + 1 - window_bars): i + 1]
         bar = bars.iloc[i]
         next_bar = bars.iloc[i + 1]
 
@@ -182,11 +190,23 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                     ex_px, reason = open_trade.stop, "stop"
                 elif open_trade.target and h >= open_trade.target:
                     ex_px, reason = open_trade.target, "target"
+            else:  # SHORT
+                if h >= open_trade.stop:
+                    ex_px, reason = open_trade.stop, "stop"
+                elif open_trade.target and l <= open_trade.target:
+                    ex_px, reason = open_trade.target, "target"
             if ex_px is not None:
                 _close_trade(open_trade, bar.name, ex_px, reason, slippage_bps)
                 equity += open_trade.pnl_net
                 res.trades.append(open_trade)
                 open_trade = None
+                if equity <= 0:   # ruin: account blown, stop trading
+                    equity = 0.0
+                    ruined = True
+
+        if ruined:
+            equity_series.append((bar.name, 0.0))
+            continue
 
         # ── 2) ask strategy for signals ──
         try:
@@ -204,21 +224,25 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                 res.trades.append(open_trade)
                 open_trade = None
                 break
-            if sig.kind == SignalKind.ENTRY_LONG and open_trade is None:
+            if sig.kind in (SignalKind.ENTRY_LONG, SignalKind.ENTRY_SHORT) and open_trade is None:
+                is_long = sig.kind == SignalKind.ENTRY_LONG
                 # size by risk: at most max_position_pct of equity, also bounded
                 # by per-trade risk (1% of equity) / per-unit risk
                 per_unit = sig.per_unit_risk
                 risk_budget = 0.01 * equity
                 qty_risk = int(risk_budget / per_unit) if per_unit > 0 else 0
-                qty_pos = int((equity * max_position_pct) / sig.entry)
+                # margin cap: notional ≤ equity × leverage (MIS-style), so a single
+                # position can't be sized beyond what the account could carry.
+                qty_pos = int((equity * min(max_position_pct, 1.0) * leverage) / sig.entry)
                 qty = max(1, min(qty_risk, qty_pos))
-                # fill at NEXT bar open (no look-ahead)
-                fill_px = float(next_bar["o"]) * (1 + slippage_bps / 1e4)
+                # fill at NEXT bar open (no look-ahead); slippage against direction
+                slip = (1 + slippage_bps / 1e4) if is_long else (1 - slippage_bps / 1e4)
+                fill_px = float(next_bar["o"]) * slip
                 open_trade = BTTrade(
                     symbol=strategy.symbol,
                     entry_ts=next_bar.name,
                     exit_ts=None,
-                    side="LONG", qty=qty,
+                    side="LONG" if is_long else "SHORT", qty=qty,
                     entry_px=fill_px, exit_px=None,
                     stop=sig.stop, target=sig.target,
                 )
