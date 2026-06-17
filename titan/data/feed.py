@@ -50,7 +50,11 @@ class Feed:
             if not code:
                 continue
             by_exch.setdefault(code, []).append(str(ins["token"]))
-            tok_map[str(ins["token"])] = ins["symbol"]
+            # Map to the UNIVERSE name (NIFTY), not Angel's tradingsymbol
+            # ("Nifty 50") — the rest of the pipeline (bar_writer, supervisor,
+            # dashboard) keys everything by the universe name. Mismatch here means
+            # real ticks land under ticks:"Nifty 50" and nothing downstream sees them.
+            tok_map[str(ins["token"])] = ins.get("name") or ins["symbol"]
         token_list = [{"exchangeType": k, "tokens": v} for k, v in by_exch.items()]
         return token_list, tok_map
 
