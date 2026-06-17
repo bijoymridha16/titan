@@ -50,12 +50,28 @@ ALL_SOURCES = [
 
 OUT_DIR = Path(__file__).resolve().parents[2] / "out"
 
-# v1 fire rule (mirrored from docs/research/02_news_driven.md §4e)
-FIRE_CATEGORY = "earnings"
-FIRE_SENTIMENT = "positive"
-FIRE_SENT_THRESHOLD = 0.70
+# v2 fire rule. v1 only fired on earnings+positive — missed order wins,
+# partnerships, guidance changes, promoter activity, regulatory shorts.
+# v2 maps each category to (required sentiment, min sent_score, direction).
+# Sentiment "any" means the action itself is the signal — promoter buying
+# is bullish regardless of FinBERT score on the headline phrasing.
 FIRE_ENTITY_CONF_THRESHOLD = 0.70
 FIRE_NIFTY50_ONLY = True
+
+FIRE_RULES: dict[str, tuple[str, float, str]] = {
+    # category:         (sentiment,   min_score,  direction)
+    "earnings":         ("positive",  0.70,       "long"),
+    "order_win":        ("positive",  0.60,       "long"),
+    "partnership":      ("positive",  0.60,       "long"),
+    "guidance_up":      ("positive",  0.60,       "long"),
+    "m_and_a":          ("positive",  0.60,       "long"),
+    "promoter_buying":  ("any",       0.0,        "long"),
+    "debt_reduce":      ("positive",  0.50,       "long"),
+    "dividend":         ("positive",  0.60,       "long"),
+    "guidance_down":    ("negative",  0.60,       "short"),
+    "promoter_selling": ("any",       0.0,        "short"),
+    "regulatory":       ("negative",  0.70,       "short"),
+}
 
 
 # ───────────────── persistence ─────────────────
@@ -97,22 +113,26 @@ def _persist_entities(event_id: int, hits) -> None:
 def _persist_signal(event_id: int, ticker: str, published_at: datetime,
                     headline: str, source: str, category: str,
                     sent_label: str, sent_score: float, entity_conf: float,
-                    would_fire: bool, fire_reason: str) -> None:
+                    would_fire: bool, fire_reason: str,
+                    direction: str | None) -> None:
     with engine().begin() as cx:
         cx.execute(text("""
             INSERT INTO news_signals
               (news_event_id, ticker, published_at, headline, source, category,
-               sentiment_label, sentiment_score, entity_conf, would_fire, fire_reason)
-            VALUES (:e, :t, :p, :h, :s, :c, :sl, :ss, :ec, :wf, :fr)
+               sentiment_label, sentiment_score, entity_conf, would_fire,
+               fire_reason, direction)
+            VALUES (:e, :t, :p, :h, :s, :c, :sl, :ss, :ec, :wf, :fr, :dir)
             ON CONFLICT (news_event_id, ticker) DO UPDATE
               SET sentiment_label = EXCLUDED.sentiment_label,
                   sentiment_score = EXCLUDED.sentiment_score,
                   category = EXCLUDED.category,
                   would_fire = EXCLUDED.would_fire,
-                  fire_reason = EXCLUDED.fire_reason
+                  fire_reason = EXCLUDED.fire_reason,
+                  direction = EXCLUDED.direction
         """), {"e": event_id, "t": ticker, "p": published_at, "h": headline,
                "s": source, "c": category, "sl": sent_label, "ss": sent_score,
-               "ec": entity_conf, "wf": would_fire, "fr": fire_reason})
+               "ec": entity_conf, "wf": would_fire, "fr": fire_reason,
+               "dir": direction})
 
 
 # ───────────────── fire logic ─────────────────
@@ -122,21 +142,25 @@ def _nifty50_set() -> set[str]:
 
 
 def _decide_fire(ticker: str, category: str, sent_label: str, sent_score: float,
-                 entity_conf: float, n50: set[str]) -> tuple[bool, str]:
+                 entity_conf: float, n50: set[str]
+                 ) -> tuple[bool, str, str | None]:
+    """Return (fire, reason, direction). direction is 'long'/'short' or None."""
     if category in NEVER_FIRE:
-        return False, f"category={category}"
+        return False, f"category={category}", None
     if FIRE_NIFTY50_ONLY and ticker not in n50:
-        return False, "not_nifty50"
+        return False, "not_nifty50", None
     if entity_conf < FIRE_ENTITY_CONF_THRESHOLD:
-        return False, f"entity_conf={entity_conf:.2f}<{FIRE_ENTITY_CONF_THRESHOLD}"
-    if category != FIRE_CATEGORY:
-        return False, f"category={category}!=earnings"
-    if sent_label != FIRE_SENTIMENT:
-        return False, f"sentiment={sent_label}!=positive"
-    if sent_score < FIRE_SENT_THRESHOLD:
-        return False, f"sent_score={sent_score:.2f}<{FIRE_SENT_THRESHOLD}"
-    return True, (f"earnings+positive {sent_score:.2f} "
-                  f"entity_conf={entity_conf:.2f}")
+        return False, f"entity_conf={entity_conf:.2f}<{FIRE_ENTITY_CONF_THRESHOLD}", None
+    rule = FIRE_RULES.get(category)
+    if rule is None:
+        return False, f"no_rule_for={category}", None
+    required_sent, min_score, direction = rule
+    if required_sent != "any" and sent_label != required_sent:
+        return False, f"sentiment={sent_label}!={required_sent}", None
+    if sent_score < min_score:
+        return False, f"sent_score={sent_score:.2f}<{min_score}", None
+    return True, (f"{category}+{sent_label} {sent_score:.2f} "
+                  f"entity_conf={entity_conf:.2f} dir={direction}"), direction
 
 
 # ───────────────── orchestration ─────────────────
@@ -177,11 +201,13 @@ def run(since: datetime) -> dict[str, int]:
         if not hits:
             continue
         for h in hits:
-            fire, reason = _decide_fire(h.ticker, category, sent["label"],
-                                        float(sent["score"]), h.confidence, n50)
+            fire, reason, direction = _decide_fire(
+                h.ticker, category, sent["label"],
+                float(sent["score"]), h.confidence, n50)
             _persist_signal(eid, h.ticker, raw.published_at, raw.headline,
                             raw.source, category, sent["label"],
-                            float(sent["score"]), h.confidence, fire, reason)
+                            float(sent["score"]), h.confidence, fire, reason,
+                            direction)
             counts["signals"] += 1
             if fire:
                 counts["fires"] += 1
@@ -200,7 +226,7 @@ def emit_csv(since: datetime, only_fires: bool = False) -> Path:
         rows = cx.execute(text(f"""
             SELECT published_at, ticker, source, category,
                    sentiment_label, sentiment_score, entity_conf,
-                   would_fire, fire_reason, headline
+                   would_fire, fire_reason, direction, headline
             FROM news_signals
             WHERE published_at >= :since
             {'AND would_fire = TRUE' if only_fires else ''}
@@ -210,7 +236,7 @@ def emit_csv(since: datetime, only_fires: bool = False) -> Path:
         writer = csv.writer(f)
         writer.writerow(["ts", "ticker", "source", "category",
                          "sentiment", "sent_score", "entity_conf",
-                         "would_fire", "fire_reason", "headline"])
+                         "would_fire", "direction", "fire_reason", "headline"])
         for r in rows:
             writer.writerow([
                 r["published_at"].isoformat() if r["published_at"] else "",
@@ -218,6 +244,7 @@ def emit_csv(since: datetime, only_fires: bool = False) -> Path:
                 r["sentiment_label"], f"{r['sentiment_score']:.3f}",
                 f"{r['entity_conf']:.2f}",
                 int(r["would_fire"]),
+                r["direction"] or "",
                 r["fire_reason"] or "",
                 r["headline"][:200],
             ])
