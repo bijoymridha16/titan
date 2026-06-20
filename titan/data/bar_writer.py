@@ -18,6 +18,7 @@ from sqlalchemy import text
 from titan.config import settings
 from titan.data.aggregator import Bar, _bucket_start
 from titan.data.store import engine
+from titan.data.tick_filter import TickSanitizer
 
 log = logging.getLogger(__name__)
 # 1d included so daily-timeframe strategies (e.g. TSMOM) actually receive bars
@@ -55,7 +56,9 @@ def run():
     r = redis.from_url(settings.redis_url, decode_responses=True)
     streams = {f"ticks:{s}": "$" for s in settings.symbols}
     state: Dict[tuple[str, str], _BucketState] = {}
-    log.info("bar_writer: streams=%s timeframes=%s", list(streams.keys()), list(TIMEFRAMES))
+    sanitizers: Dict[str, TickSanitizer] = {}
+    log.info("bar_writer: streams=%s timeframes=%s tick_filter=%s",
+             list(streams.keys()), list(TIMEFRAMES), settings.tick_filter_enabled)
 
     while True:
         try:
@@ -74,6 +77,25 @@ def run():
                     continue
                 ts = datetime.fromisoformat(t["ts"].replace("Z", "+00:00"))
                 price = float(t["ltp"]); vol = int(t.get("volume", 0))
+
+                # Scenario A: drop corrupted quotes before they reach the OHLCV
+                # path. Rejected ticks go to a dead-letter stream for inspection.
+                if settings.tick_filter_enabled:
+                    san = sanitizers.get(symbol)
+                    if san is None:
+                        san = sanitizers[symbol] = TickSanitizer(
+                            n_sigma=settings.tick_outlier_sigma,
+                            window_s=settings.tick_filter_window_s,
+                            min_samples=settings.tick_filter_min_samples)
+                    if not san.accept(ts, price, vol):
+                        log.warning("tick outlier dropped: %s price=%.2f", symbol, price)
+                        try:
+                            r.xadd(f"ticks:deadletter:{symbol}",
+                                   {"data": fields["data"]},
+                                   maxlen=2_000, approximate=True)
+                        except Exception:
+                            pass
+                        continue
 
                 for tf, secs in TIMEFRAMES.items():
                     key = (symbol, tf)

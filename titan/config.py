@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     feed_stale_after_s: int = 30         # hard → restart feed process
     feed_rest_fallback: bool = True      # master switch for the REST bridge
 
+    # ─── tick sanitization (manifesto Scenario A: corrupted-quote rejection) ───
+    # Angel's WS has been observed emitting wildly wrong prices. A tick deviating
+    # more than N std-devs from the trailing volume-weighted price is treated as
+    # an infrastructure anomaly: dropped from the OHLCV path and parked on the
+    # dead-letter stream `ticks:deadletter:<symbol>` for later inspection.
+    tick_filter_enabled: bool = True
+    tick_outlier_sigma: float = 4.0
+    tick_filter_window_s: int = 300      # trailing window for VWAP / std (5 min)
+    tick_filter_min_samples: int = 20    # accept-all until the window has this many
+
     universe: str = "NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK"
 
     # How an index/underlying signal is actually EXECUTED (D1). Default ETF —
