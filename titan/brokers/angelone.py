@@ -30,6 +30,7 @@ import socket
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pyotp
@@ -52,8 +53,25 @@ CANCEL_ORDER_PATH = "/rest/secure/angelbroking/order/v1/cancelOrder"
 ORDER_BOOK_PATH = "/rest/secure/angelbroking/order/v1/getOrderBook"
 ORDER_DETAILS_PATH = "/rest/secure/angelbroking/order/v1/details"
 POSITIONS_PATH = "/rest/secure/angelbroking/order/v1/getPosition"
+LOGOUT_PATH = "/rest/secure/angelbroking/user/v1/logout"
 
 WS_URL = "wss://smartapisocket.angelone.in/smart-stream"
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def session_needs_refresh(jwt, token_day, today, expires_at, now) -> bool:
+    """Pure decision: must we do a fresh login? (SEBI 2026 daily session reset)
+
+    True when: no token yet, the JWT has expired, OR the token was minted on a
+    different trading day (forces a fresh OAuth+2FA handshake each new day).
+    """
+    if not jwt:
+        return True
+    if expires_at and now >= expires_at:
+        return True
+    if token_day is not None and today != token_day:
+        return True
+    return False
 
 
 def _local_ip() -> str:
@@ -92,6 +110,7 @@ class AngelOneBroker(BrokerAdapter):
         self._refresh: str | None = None
         self._feed_token: str | None = None
         self._expires_at: datetime | None = None
+        self._token_day = None          # IST trading date the token was minted for
         self._client: httpx.Client | None = None
 
     # ─────────────── public ───────────────
@@ -343,11 +362,28 @@ class AngelOneBroker(BrokerAdapter):
         self._refresh = body["refreshToken"]
         self._feed_token = body["feedToken"]
         self._expires_at = datetime.now(timezone.utc) + timedelta(hours=22)
-        log.info("angelone: login OK, jwt expires ~%s", self._expires_at.isoformat())
+        self._token_day = datetime.now(IST).date()
+        log.info("angelone: login OK, jwt expires ~%s (day=%s)",
+                 self._expires_at.isoformat(), self._token_day)
 
     def _ensure_token(self) -> None:
-        if not self._jwt or (self._expires_at and datetime.now(timezone.utc) >= self._expires_at):
+        if session_needs_refresh(self._jwt, self._token_day, datetime.now(IST).date(),
+                                 self._expires_at, datetime.now(timezone.utc)):
             self._login_sync()
+
+    async def logout(self) -> None:
+        """Sever the API session (SEBI 2026 mandatory daily logout). Best-effort;
+        always clears local tokens so the next call forces a fresh handshake."""
+        if self._jwt and self._client:
+            try:
+                self._client.post(LOGOUT_PATH, headers=self._auth_headers(),
+                                  json={"clientcode": self.cfg.client_code}, timeout=10.0)
+                log.info("angelone: session logged out")
+            except Exception as e:
+                log.warning("angelone: logout call failed (clearing tokens anyway): %s", e)
+        self._jwt = self._refresh = self._feed_token = None
+        self._expires_at = None
+        self._token_day = None
 
     def _login_headers(self, c: httpx.Client) -> dict[str, str]:
         return {
