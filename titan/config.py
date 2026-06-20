@@ -138,6 +138,15 @@ class Settings(BaseSettings):
     def autopilot_validated_set(self) -> set[str]:
         return {s.strip() for s in self.autopilot_validated.split(",") if s.strip()}
 
+    # ─── self-healing walk-forward daemon (manifesto §3) ───
+    # Re-runs the walk-forward vetting on a schedule and re-promotes survivors so
+    # the validated allowlist tracks live edge and decayed strategies are demoted
+    # automatically. weekday: Mon=0 … Sun=6 (default Sat). hour: IST.
+    wf_daemon_weekday: int = 5
+    wf_daemon_hour: int = 18
+    wf_daemon_tf: str = "5m"
+    wf_daemon_max_bars: int = 0   # 0 = all available history
+
 
 class NewsSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NEWS_", env_file=".env", extra="ignore")
