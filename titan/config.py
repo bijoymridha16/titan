@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     max_ops: float = 10.0
     ops_burst: int = 10
 
+    # ─── exchange Strategy IDs (manifesto Scenario B: SEBI 2026 traceability) ───
+    # Per-strategy exchange-registered IDs, embedded in every order payload.
+    # Format: "orb:NSE12345,vwap_revert:NSE67890". `strategy_id_default` (or the
+    # ALGO_ID env) is the fallback when a strategy has no specific mapping.
+    strategy_ids: str = ""
+    strategy_id_default: str = ""
+
+    @property
+    def strategy_id_map(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in self.strategy_ids.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                name, sid = pair.split(":", 1)
+                if name.strip() and sid.strip():
+                    out[name.strip()] = sid.strip()
+        return out
+
     universe: str = "NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK"
 
     # How an index/underlying signal is actually EXECUTED (D1). Default ETF —

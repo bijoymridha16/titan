@@ -44,6 +44,9 @@ class Order:
     price: Optional[float] = None
     trigger_price: Optional[float] = None
     strategy: str = "manual"
+    # Exchange-provided Strategy ID (SEBI 2026 traceability) — distinct from the
+    # human strategy NAME above. Embedded in the broker payload when present.
+    strategy_id: Optional[str] = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     broker_order_id: Optional[str] = None
     status: OrderStatus = OrderStatus.NEW

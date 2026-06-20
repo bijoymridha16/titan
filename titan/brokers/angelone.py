@@ -209,6 +209,9 @@ class AngelOneBroker(BrokerAdapter):
             "triggerprice": f"{order.trigger_price:.2f}" if order.trigger_price else "0",
             "quantity": str(order.qty),
         }
+        # SEBI 2026: tag every order with its exchange-registered Strategy ID.
+        if order.strategy_id:
+            payload["strategyid"] = order.strategy_id
 
         # gate 5: dry-run — log the exact payload, do NOT call Angel.
         # This is the most important gate for week 1: lets you watch what would

@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 
 from titan.brokers.base import BrokerAdapter, Order, OrderSide, OrderStatus, OrderType, Product
-from titan.config import settings
+from titan.config import algo_settings, settings
 from titan.execution.locks import acquire_order_lock, order_lock_key, release_order_lock
 from titan.execution.rate_limit import AsyncRateLimiter
 from titan.risk.engine import RiskEngine
@@ -19,6 +19,15 @@ from titan.risk.sizing import fixed_fractional_qty
 from titan.strategies.base import Signal, SignalKind
 
 log = logging.getLogger(__name__)
+
+
+def resolve_strategy_id(strategy_name: str) -> str | None:
+    """Exchange Strategy ID for this strategy (SEBI 2026). Per-strategy mapping
+    first, then the configured default, then the ALGO_ID env. None if unset."""
+    return (settings.strategy_id_map.get(strategy_name)
+            or settings.strategy_id_default
+            or algo_settings.algo_id
+            or None)
 
 
 @dataclass
@@ -66,6 +75,7 @@ class ExecutionRouter:
             symbol=signal.symbol, side=side, qty=qty,
             order_type=OrderType.MARKET, product=Product.INTRADAY,
             price=signal.entry, strategy=strategy_name,
+            strategy_id=resolve_strategy_id(strategy_name),
         )
 
         decision = self.risk.check(order, per_unit_risk=signal.per_unit_risk,
