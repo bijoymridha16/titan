@@ -12,6 +12,7 @@ class RiskLimits:
     capital: float
     max_risk_per_trade_pct: float
     max_daily_loss_pct: float
+    max_daily_profit_pct: float
     max_weekly_loss_pct: float
     max_drawdown_pct: float
     max_consecutive_losses: int
@@ -24,6 +25,7 @@ class RiskLimits:
             capital=settings.capital,
             max_risk_per_trade_pct=settings.max_risk_per_trade_pct,
             max_daily_loss_pct=settings.max_daily_loss_pct,
+            max_daily_profit_pct=settings.max_daily_profit_pct,
             max_weekly_loss_pct=settings.max_weekly_loss_pct,
             max_drawdown_pct=settings.max_drawdown_pct,
             max_consecutive_losses=settings.max_consecutive_losses,
@@ -38,6 +40,10 @@ class RiskLimits:
     @property
     def max_daily_loss_inr(self) -> float:
         return self.capital * self.max_daily_loss_pct / 100.0
+
+    @property
+    def max_daily_profit_inr(self) -> float:
+        return self.capital * self.max_daily_profit_pct / 100.0
 
     @property
     def max_weekly_loss_inr(self) -> float:

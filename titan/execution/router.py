@@ -46,6 +46,7 @@ class ExecutionRouter:
             entry=signal.entry,
             stop=signal.stop,
             lot_size=self.lot_size,
+            confidence=signal.confidence,   # M3: conviction now affects size
         )
         if qty < 1:
             return ExecutionResult(signal, None, False, "sizing → 0 qty")

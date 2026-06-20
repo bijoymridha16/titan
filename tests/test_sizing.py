@@ -1,4 +1,4 @@
-from titan.risk.sizing import atr_position_size, fixed_fractional_qty
+from titan.risk.sizing import fixed_fractional_qty
 
 
 def test_fixed_fractional_basic():
@@ -20,14 +20,20 @@ def test_fixed_fractional_zero_when_bad_inputs():
     assert fixed_fractional_qty(500_000, 1.0, 5, 0) == 0
 
 
-def test_atr_sizing():
-    # ATR=10, mult=1.5 → per-unit risk 15; 1% of 5L = 5k → 333 qty
-    assert atr_position_size(500_000, 1.0, atr=10, atr_multiple=1.5) == 333
+def test_confidence_scales_size_down():
+    # M3: half confidence → half the risk budget → half the qty
+    full = fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=1.0)
+    half = fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=0.5)
+    assert half == full // 2 == 250
 
 
-def test_atr_sizing_lot_size():
-    assert atr_position_size(500_000, 1.0, atr=10, atr_multiple=1.5, lot_size=25) == 325
+def test_confidence_clamped_low():
+    # confidence below 0.1 floors at 0.1 (a min sleeve, never zero from conviction)
+    tiny = fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=0.0)
+    assert tiny == fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=0.1)
+    assert tiny == 50
 
 
-def test_atr_zero_when_atr_zero():
-    assert atr_position_size(500_000, 1.0, atr=0) == 0
+def test_confidence_above_one_does_not_upsize():
+    base = fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=1.0)
+    assert fixed_fractional_qty(500_000, 1.0, 100, 90, confidence=5.0) == base

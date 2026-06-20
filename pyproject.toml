@@ -23,10 +23,14 @@ dependencies = [
     "plotly>=5.20",
     "pyotp>=2.9",            # Angel One TOTP login
     "smartapi-python>=1.4",  # Angel One official SDK
+    "logzero>=1.7",          # required by smartapi-python (WS feed)
+    "websocket-client>=1.7", # required by smartapi-python SmartWebSocketV2
     "structlog>=24.1",
     "python-telegram-bot>=21.0",
     "pytz>=2024.1",
     "click>=8.1",
+    "streamlit-autorefresh>=1.0",   # dashboard 5s auto-refresh (titan/dashboard/app.py)
+    "rapidfuzz>=3.0",               # news entity fuzzy-matching (titan/news/entities.py)
 ]
 
 [project.optional-dependencies]

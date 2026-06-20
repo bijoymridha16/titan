@@ -1,6 +1,7 @@
 """VectorBT runner — for fast parameter sweeps. NOT authoritative.
 
-Use bt_runner for any decision that approaches real capital. VectorBT's
+Use the event-driven engine (backtest/engine.py) for any decision that
+approaches real capital. VectorBT's
 vectorized fills do not respect risk-engine state machines (daily caps,
 consecutive losses, kill switch) — sweeps are only for finding plausible
 parameter neighborhoods to then validate event-driven.
@@ -16,5 +17,5 @@ def sweep_orb(bars: pd.DataFrame, or_minutes_grid=(5, 15, 30), target_r_grid=(1.
     a real free-data source is plumbed in."""
     raise NotImplementedError(
         "Plumb your bars source first, then implement vbt.Portfolio.from_signals "
-        "with per-day OR computation. Do not trust raw VBT P&L until matched against bt_runner."
+        "with per-day OR computation. Do not trust raw VBT P&L until matched against engine.py."
     )

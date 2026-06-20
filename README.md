@@ -30,9 +30,10 @@ TITAN is an end-to-end algo trading stack:
 
 - Ingests live ticks from Angel One SmartAPI (or a synthetic feed for testing)
 - Aggregates ticks → 1m/3m/5m/15m OHLCV bars in TimescaleDB
-- Runs pluggable strategies (currently **ORB** — Opening Range Breakout)
+- Runs pluggable strategies (validated: **ORB**; plus a 59-variant strategy library vetted via walk-forward before any are promoted)
+- Selects which strategies run **automatically by market regime** (the auto-pilot), or manually
 - Executes via a **paper broker** (always) with optional **shadow live dry-run** on Angel One
-- Gates every order through an 8-check RiskEngine + 5-check live broker
+- Gates every order through an 11-check RiskEngine + 5-check live broker
 - Surfaces everything in a Streamlit dashboard and a FastAPI control plane
 
 The design invariant: **backtest, paper, and live use the same `Strategy` interface and the same `RiskEngine`** — what passes paper is exactly what will run live.
@@ -66,7 +67,7 @@ The design invariant: **backtest, paper, and live use the same `Strategy` interf
                                      │ Signal
                                      ▼
                           ┌─────────────────────┐
-                          │     RiskEngine      │ ── 8 gates
+                          │     RiskEngine      │ ── 11 gates
                           └──────────┬──────────┘
                                      │ approved Order
                             ┌────────┴────────┐
@@ -136,10 +137,11 @@ python -m titan.news.ingest --hours 24 --csv
 TITAN runs as **five long-lived processes** plus the synth feed (only in dev). The simplest dev cycle:
 
 ```bash
-# terminal 1: tick source (synthetic — or live Angel WS)
-python -m titan.data.synth_feed                    # synth (recommended for dev)
-# OR
-python -m titan.data.angelone_ws                   # live ticks (needs creds)
+# terminal 1: tick source
+python -m titan.data.feed_supervisor               # REAL Angel WS, auto-managed by
+                                                   # market hours (default; needs creds)
+# OR, offline replay / dev only (explicit simulation — clearly labeled 🧪):
+#   TITAN_SIM_MODE=1 python -m titan.data.synth_feed
 
 # terminal 2: tick → bar aggregator
 python -m titan.data.bar_writer
@@ -152,6 +154,9 @@ uvicorn titan.api.main:app --port 8000
 
 # terminal 5: dashboard
 streamlit run titan/dashboard/app.py --server.port 8501
+
+# terminal 6 (optional): auto-pilot — decision-driven strategy selection
+python -m titan.decision.auto_pilot                # observe-only until armed
 ```
 
 Then open:
@@ -168,6 +173,24 @@ curl -X POST http://localhost:8000/strategies/orb/stop
 ```
 
 Strategies are tracked in a Redis set `titan:strategies:enabled`. The supervisor checks this on every bar.
+
+### Decision-driven mode (auto-pilot)
+
+Instead of toggling strategies by hand, let the **auto-pilot** do it: it classifies
+the market regime (TREND / RANGE / CRISIS / TRANSITION) from NIFTY 5m bars with
+deterministic rules and arms only **validated** strategies for the current regime.
+Every decision is logged with the exact features that produced it. See
+`docs/08_automation_design.md`.
+
+```bash
+curl -X POST http://localhost:8000/autopilot/arm      # hand it the keys
+curl -X POST http://localhost:8000/autopilot/disarm   # back to observe-only
+curl       http://localhost:8000/autopilot            # current regime + arm state
+```
+
+By default it runs **observe-only** (classifies and logs what it *would* do without
+arming anything) and can only ever enable strategies in `TITAN_AUTOPILOT_VALIDATED`
+(default `orb`) — unvalidated/killed strategies are unreachable by construction.
 
 ### Kill switch
 
@@ -225,7 +248,7 @@ To add a new strategy:
 
 Defense in depth — every order passes through **two layers** before reaching the exchange.
 
-**Layer 1 — RiskEngine (8 gates, in `titan/risk/engine.py`):**
+**Layer 1 — RiskEngine (11 gates, in `titan/risk/engine.py`):**
 1. Kill switch off
 2. Within trading hours (09:15–15:15 IST)
 3. Strategy enabled

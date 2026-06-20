@@ -50,7 +50,11 @@ class Feed:
             if not code:
                 continue
             by_exch.setdefault(code, []).append(str(ins["token"]))
-            tok_map[str(ins["token"])] = ins["name"]
+            # Map to the UNIVERSE name (NIFTY), not Angel's tradingsymbol
+            # ("Nifty 50") — the rest of the pipeline (bar_writer, supervisor,
+            # dashboard) keys everything by the universe name. Mismatch here means
+            # real ticks land under ticks:"Nifty 50" and nothing downstream sees them.
+            tok_map[str(ins["token"])] = ins.get("name") or ins["symbol"]
         # Invariant: every configured short symbol must resolve to a token.
         # If this fails the feed will write ticks under the wrong key and ORB,
         # bar_writer and the dashboard will silently read stale data.
