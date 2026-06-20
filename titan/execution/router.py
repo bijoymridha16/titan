@@ -51,6 +51,48 @@ class ExecutionRouter:
         self.rate_limiter = rate_limiter or AsyncRateLimiter(
             settings.max_ops, settings.ops_burst)
 
+    async def _to_option_order(self, order: Order, signal: Signal) -> tuple[bool, str | None]:
+        """Rewrite a (gated) underlying order into a weekly ATM option order.
+
+        Uses the signal entry as the spot proxy; resolves the contract, sizes in
+        whole lots (1 lot for now — margin-aware sizing lands in the margin
+        integration), and pegs a midpoint limit when configured. Returns
+        (ok, reject_reason)."""
+        from datetime import datetime, timezone
+        from titan.execution import options as opt
+
+        spot = signal.entry
+        inst = opt.resolve_option_contract(signal.symbol, spot, order.side,
+                                           datetime.now(timezone.utc).date())
+        if not inst:
+            return False, f"option contract unresolved for {signal.symbol}"
+
+        lot = int(inst.get("lotsize") or opt.lot_size_for(signal.symbol))
+        order.symbol = inst["symbol"]
+        order.product = Product.INTRADAY
+        order.qty = opt.lots_to_qty(1, lot)   # 1 lot; margin-aware sizing is a follow-up
+
+        # premium for sizing/limit anchor
+        try:
+            premium = await self.broker.get_ltp(
+                inst["symbol"], settings.option_exchange, str(inst["token"]))
+        except Exception as e:
+            premium = signal.entry
+            log.warning("option LTP lookup failed (%s) — using signal price", e)
+
+        if settings.order_exec_mode.upper() == "MIDPOINT_LIMIT":
+            # no depth here → anchor the limit at the premium (LTP). cancel-on-no-
+            # fill within limit_fill_timeout_s is enforced by the position manager.
+            order.order_type = OrderType.LIMIT
+            order.price = opt.midpoint(None, None, premium)
+        else:
+            order.order_type = OrderType.MARKET
+            order.price = premium
+        log.info("option order: %s %s qty=%d type=%s px=%.2f",
+                 order.symbol, order.side.value, order.qty,
+                 order.order_type.value, order.price or 0.0)
+        return True, None
+
     async def submit(self, signal: Signal, strategy_name: str) -> ExecutionResult:
         if signal.kind == SignalKind.EXIT:
             log.info("EXIT signals handled by position manager, not router")
@@ -86,6 +128,14 @@ class ExecutionRouter:
 
         if decision.adjusted_qty:
             order.qty = decision.adjusted_qty
+
+        # ── options pivot: risk gates on the underlying signal, but we DISPATCH
+        # the concrete weekly ATM option (Multiplier 1). Swap symbol/qty/price
+        # after the gate so the index-based risk check still applies. ──
+        if settings.instrument_kind.upper() == "OPTION":
+            ok, reason = await self._to_option_order(order, signal)
+            if not ok:
+                return ExecutionResult(signal, order, False, reason)
 
         # ── idempotency: lock this (strategy, symbol) dispatch ──
         lock_key = order_lock_key(strategy_name, signal.symbol)

@@ -92,6 +92,44 @@ class Settings(BaseSettings):
     # the underlying→instrument map lives in config/instrument_map.yaml.
     instrument_kind: Literal["ETF", "OPTION", "INDEX", "EQUITY"] = "ETF"
 
+    # ─── options pivot (manifesto Multiplier 1 / Scenario C) ───
+    # 2026 index lot sizes (configurable — these are exchange-set and revised
+    # periodically; verify against the current NSE circular before live).
+    lot_sizes: str = "NIFTY:65,BANKNIFTY:30,FINNIFTY:60,MIDCPNIFTY:120,SENSEX:20"
+    # ATM strike rounding step per underlying.
+    option_strike_steps: str = "NIFTY:50,BANKNIFTY:100,FINNIFTY:50,SENSEX:100"
+    option_expiry_weekday: int = 3       # Mon=0…Sun=6; weekly expiry (verify per index)
+    option_offset_steps: int = 0         # 0 = ATM; +n = n strikes OTM
+    option_exchange: str = "NFO"
+    # Execution style: MARKET, or MIDPOINT_LIMIT (peg a limit to bid-ask midpoint,
+    # cancel if unfilled within limit_fill_timeout_s — kills negative slippage).
+    order_exec_mode: Literal["MARKET", "MIDPOINT_LIMIT"] = "MARKET"
+    limit_fill_timeout_s: int = 15
+
+    @property
+    def lot_size_map(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for pair in self.lot_sizes.split(","):
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                try:
+                    out[k.strip().upper()] = int(v)
+                except ValueError:
+                    pass
+        return out
+
+    @property
+    def strike_step_map(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for pair in self.option_strike_steps.split(","):
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                try:
+                    out[k.strip().upper()] = float(v)
+                except ValueError:
+                    pass
+        return out
+
     # ─── live-trading safety gates ───
     live_enabled: bool = False
     live_max_order_value: float = 25_000.0
