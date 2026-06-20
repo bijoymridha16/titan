@@ -51,34 +51,63 @@ class ExecutionRouter:
         self.rate_limiter = rate_limiter or AsyncRateLimiter(
             settings.max_ops, settings.ops_burst)
 
-    async def _to_option_order(self, order: Order, signal: Signal) -> tuple[bool, str | None]:
+    async def _option_premium(self, inst: dict, fallback: float) -> float:
+        try:
+            return await self.broker.get_ltp(
+                inst["symbol"], settings.option_exchange, str(inst["token"]))
+        except Exception as e:
+            log.warning("option LTP lookup failed (%s) — using fallback", e)
+            return fallback
+
+    async def _to_option_order(self, order: Order, signal: Signal,
+                               available: float) -> tuple[bool, str | None]:
         """Rewrite a (gated) underlying order into a weekly ATM option order.
 
-        Uses the signal entry as the spot proxy; resolves the contract, sizes in
-        whole lots (1 lot for now — margin-aware sizing lands in the margin
-        integration), and pegs a midpoint limit when configured. Returns
-        (ok, reject_reason)."""
+        Resolves the contract from the signal-entry spot; sizes in whole lots;
+        pegs a midpoint limit when configured. When margin checks are on, runs
+        the downsize/pivot protocol (Multiplier 3): if the contract's margin
+        won't fit available capital after a buffer, step OTM to a cheaper strike
+        rather than eat a broker rejection. Returns (ok, reject_reason)."""
         from datetime import datetime, timezone
         from titan.execution import options as opt
 
         spot = signal.entry
-        inst = opt.resolve_option_contract(signal.symbol, spot, order.side,
-                                           datetime.now(timezone.utc).date())
+        today = datetime.now(timezone.utc).date()
+        base_off = settings.option_offset_steps
+        max_steps = settings.margin_max_otm_steps if settings.margin_check_enabled else 0
+
+        inst = premium = None
+        for off in range(base_off, base_off + max_steps + 1):
+            cand = opt.resolve_option_contract(signal.symbol, spot, order.side, today,
+                                               offset_steps=off)
+            if not cand:
+                continue
+            lot = int(cand.get("lotsize") or opt.lot_size_for(signal.symbol))
+            qty = opt.lots_to_qty(1, lot)
+            prem = await self._option_premium(cand, signal.entry)
+            if not settings.margin_check_enabled:
+                inst, premium = cand, prem
+                break
+            leg = {"exchange": settings.option_exchange, "qty": qty, "price": prem,
+                   "productType": order.product.value, "token": str(cand["token"]),
+                   "tradeType": order.side.value}
+            required = await self.broker.batch_margin([leg])
+            if required is None or opt.fits_margin(required, available,
+                                                   settings.margin_buffer_pct):
+                inst, premium = cand, prem
+                break
+            log.info("margin pivot: %s margin ₹%.0f > avail — stepping OTM",
+                     cand["symbol"], required)
+
         if not inst:
-            return False, f"option contract unresolved for {signal.symbol}"
+            return False, (f"option contract unresolved for {signal.symbol}"
+                           if max_steps == 0 else
+                           "margin: no affordable strike within OTM range")
 
         lot = int(inst.get("lotsize") or opt.lot_size_for(signal.symbol))
         order.symbol = inst["symbol"]
         order.product = Product.INTRADAY
-        order.qty = opt.lots_to_qty(1, lot)   # 1 lot; margin-aware sizing is a follow-up
-
-        # premium for sizing/limit anchor
-        try:
-            premium = await self.broker.get_ltp(
-                inst["symbol"], settings.option_exchange, str(inst["token"]))
-        except Exception as e:
-            premium = signal.entry
-            log.warning("option LTP lookup failed (%s) — using signal price", e)
+        order.qty = opt.lots_to_qty(1, lot)
 
         if settings.order_exec_mode.upper() == "MIDPOINT_LIMIT":
             # no depth here → anchor the limit at the premium (LTP). cancel-on-no-
@@ -133,7 +162,8 @@ class ExecutionRouter:
         # the concrete weekly ATM option (Multiplier 1). Swap symbol/qty/price
         # after the gate so the index-based risk check still applies. ──
         if settings.instrument_kind.upper() == "OPTION":
-            ok, reason = await self._to_option_order(order, signal)
+            available = float(funds.get("cash", equity))
+            ok, reason = await self._to_option_order(order, signal, available)
             if not ok:
                 return ExecutionResult(signal, order, False, reason)
 

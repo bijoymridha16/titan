@@ -95,7 +95,7 @@ def test_router_swaps_to_option_contract(monkeypatch):
     monkeypatch.setattr(router_mod.settings, "instrument_kind", "OPTION")
     monkeypatch.setattr(router_mod.settings, "order_exec_mode", "MIDPOINT_LIMIT")
     monkeypatch.setattr(opt, "resolve_option_contract",
-                        lambda u, s, side, today: {
+                        lambda u, s, side, today, offset_steps=0: {
                             "symbol": "NIFTY26JUN24550CE", "token": "111", "lotsize": 65})
     broker = _Broker()
     router = ExecutionRouter(broker, _Risk(), lot_size=1)
@@ -110,9 +110,64 @@ def test_router_swaps_to_option_contract(monkeypatch):
 
 def test_router_rejects_when_option_unresolved(monkeypatch):
     monkeypatch.setattr(router_mod.settings, "instrument_kind", "OPTION")
-    monkeypatch.setattr(opt, "resolve_option_contract", lambda u, s, side, today: None)
+    monkeypatch.setattr(opt, "resolve_option_contract",
+                        lambda u, s, side, today, offset_steps=0: None)
     router = ExecutionRouter(_Broker(), _Risk(), lot_size=1)
     sig = Signal(ts=None, symbol="NIFTY", kind=SignalKind.ENTRY_LONG, entry=24_537.0, stop=24_500.0)
     res = asyncio.run(router.submit(sig, "orb"))
     assert res.approved is False
     assert "unresolved" in res.reason
+
+
+# ── B2: margin fit + downsize/pivot ──
+
+def test_fits_margin_buffer():
+    assert opt.fits_margin(required=4500, available=5000, buffer_pct=5.0) is True
+    assert opt.fits_margin(required=4800, available=5000, buffer_pct=5.0) is False   # >4750
+    assert opt.fits_margin(required=4750, available=5000, buffer_pct=5.0) is True
+
+
+class _MarginBroker(_Broker):
+    """Returns a margin that only fits once we step ≥2 strikes OTM."""
+    def __init__(self): super().__init__(); self.margin_calls = 0
+    async def batch_margin(self, legs):
+        self.margin_calls += 1
+        # price encodes the strike: cheaper (OTM) → lower margin
+        return float(legs[0]["price"]) * legs[0]["qty"]
+
+
+def test_router_pivots_otm_until_margin_fits(monkeypatch):
+    monkeypatch.setattr(router_mod.settings, "instrument_kind", "OPTION")
+    monkeypatch.setattr(router_mod.settings, "order_exec_mode", "MARKET")
+    monkeypatch.setattr(router_mod.settings, "margin_check_enabled", True)
+    monkeypatch.setattr(router_mod.settings, "margin_buffer_pct", 5.0)
+    monkeypatch.setattr(router_mod.settings, "margin_max_otm_steps", 5)
+    monkeypatch.setattr(router_mod.settings, "option_offset_steps", 0)
+
+    # premium falls as we go OTM: offset 0→120, 1→90, 2→40 (40*1 qty fits 100k? use small qty)
+    prem_by_off = {0: 6000.0, 1: 5500.0, 2: 4000.0}
+
+    def fake_resolve(u, s, side, today, offset_steps=0):
+        return {"symbol": f"NIFTY_OFF{offset_steps}CE", "token": str(offset_steps), "lotsize": 1}
+    monkeypatch.setattr(opt, "resolve_option_contract", fake_resolve)
+
+    broker = _MarginBroker()
+
+    async def fake_ltp(symbol, exchange="NSE", symboltoken=None):
+        return prem_by_off[int(symboltoken)]
+    broker.get_ltp = fake_ltp
+
+    router = ExecutionRouter(broker, _Risk(), lot_size=1)
+    sig = Signal(ts=None, symbol="NIFTY", kind=SignalKind.ENTRY_LONG, entry=24_537.0, stop=24_500.0)
+    # available cash 5000 → fits only when margin (=premium*1) ≤ 4750 → offset 2 (4000)
+    monkeypatch.setattr(_Risk, "check",
+                        lambda self, order, per_unit_risk, available_cash: __import__(
+                            "titan.risk.engine", fromlist=["RiskDecision"]).RiskDecision(True, None))
+
+    async def funds(): return {"equity": 5000.0, "cash": 5000.0}
+    broker.get_funds = funds
+
+    res = asyncio.run(router.submit(sig, "orb"))
+    assert res.approved is True
+    assert broker.placed.symbol == "NIFTY_OFF2CE"      # pivoted 2 strikes OTM
+    assert broker.margin_calls == 3                     # tried offsets 0,1,2

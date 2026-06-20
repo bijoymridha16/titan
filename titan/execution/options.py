@@ -66,8 +66,13 @@ def lots_to_qty(lots: int, lot_size: int) -> int:
     return max(1, lots) * max(1, lot_size)
 
 
+def fits_margin(required: float, available: float, buffer_pct: float) -> bool:
+    """True if `required` margin fits within `available` after a safety buffer."""
+    return required <= available * (1.0 - buffer_pct / 100.0)
+
+
 def resolve_option_contract(underlying: str, spot: float, side: OrderSide,
-                            today: date) -> dict | None:
+                            today: date, offset_steps: int | None = None) -> dict | None:
     """Look up the concrete weekly ATM option in the instruments master.
 
     Returns the instrument dict (token, symbol, lotsize, strike, expiry…) or
@@ -77,7 +82,8 @@ def resolve_option_contract(underlying: str, spot: float, side: OrderSide,
     from titan.data.instruments import lookup
 
     root = tradable_symbol(underlying, "OPTION")
-    strike = atm_strike(underlying, spot, settings.option_offset_steps)
+    off = settings.option_offset_steps if offset_steps is None else offset_steps
+    strike = atm_strike(underlying, spot, off)
     opt_type = option_type_for(side)
     expiry = weekly_expiry(today, settings.option_expiry_weekday)
     itype = "OPTIDX" if underlying.upper() in settings.lot_size_map else "OPTSTK"

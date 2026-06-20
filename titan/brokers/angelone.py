@@ -54,6 +54,7 @@ ORDER_BOOK_PATH = "/rest/secure/angelbroking/order/v1/getOrderBook"
 ORDER_DETAILS_PATH = "/rest/secure/angelbroking/order/v1/details"
 POSITIONS_PATH = "/rest/secure/angelbroking/order/v1/getPosition"
 LOGOUT_PATH = "/rest/secure/angelbroking/user/v1/logout"
+MARGIN_BATCH_PATH = "/rest/secure/angelbroking/margin/v1/batch"
 
 WS_URL = "wss://smartapisocket.angelone.in/smart-stream"
 IST = ZoneInfo("Asia/Kolkata")
@@ -145,6 +146,22 @@ class AngelOneBroker(BrokerAdapter):
     @property
     def feed_token(self) -> str | None:
         return self._feed_token
+
+    async def batch_margin(self, legs: list[dict]) -> float | None:
+        """Required total margin (SPAN+Exposure) for a basket via the batch
+        endpoint (manifesto Multiplier 3). `legs` = list of position dicts
+        (exchange, qty, price, productType, token, tradeType…). Returns the
+        total margin required, or None if it can't be computed (best-effort)."""
+        self._ensure_token()
+        try:
+            r = self._client.post(MARGIN_BATCH_PATH, headers=self._auth_headers(),
+                                 json={"positions": legs}, timeout=10.0)
+            data = self._unwrap(r, "marginBatch") or {}
+            val = data.get("totalMarginRequired") or data.get("total_margin_required")
+            return float(val) if val is not None else None
+        except Exception as e:
+            log.warning("batch margin failed: %s", e)
+            return None
 
     async def get_order_details(self, unique_order_id: str) -> dict | None:
         """Reconcile an ambiguous dispatch: fetch the authoritative order state

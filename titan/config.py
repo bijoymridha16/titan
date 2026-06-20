@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     order_exec_mode: Literal["MARKET", "MIDPOINT_LIMIT"] = "MARKET"
     limit_fill_timeout_s: int = 15
 
+    # ─── margin velocity (manifesto Multiplier 3) ───
+    # Pre-trade SPAN+Exposure margin check via the batch endpoint. When the ATM
+    # contract's margin won't fit available capital (after a buffer), step OTM to
+    # a cheaper strike rather than eat a broker rejection. Off by default — it
+    # needs the live margin API; enable once creds/whitelist are in place.
+    margin_check_enabled: bool = False
+    margin_buffer_pct: float = 5.0
+    margin_max_otm_steps: int = 5
+
     @property
     def lot_size_map(self) -> dict[str, int]:
         out: dict[str, int] = {}
