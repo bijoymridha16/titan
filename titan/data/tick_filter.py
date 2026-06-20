@@ -15,6 +15,10 @@ Design notes:
   mean when all volumes are zero (e.g. REST-bridge ticks carry no volume).
 - An outlier does NOT enter the window — otherwise a burst of corrupt ticks
   would drag the reference toward the garbage and start accepting it.
+- TIMESTAMP guard: a tick dated far from the latest seen (replayed/stale, or a
+  clock-glitch future tick) would otherwise prune the window to empty and slip
+  through the warm-up path with a corrupt price. Such ticks are rejected up
+  front (found in live testing 2026-06-20).
 """
 from __future__ import annotations
 
@@ -25,11 +29,15 @@ from datetime import datetime
 
 class TickSanitizer:
     def __init__(self, n_sigma: float = 4.0, window_s: int = 300,
-                 min_samples: int = 20):
+                 min_samples: int = 20, max_ts_drift_s: float | None = None):
         self.n_sigma = n_sigma
         self.window_s = window_s
         self.min_samples = min_samples
+        # how far a tick's timestamp may drift from the latest seen before it's
+        # treated as a timestamp anomaly. Defaults to the window length.
+        self.max_ts_drift_s = window_s if max_ts_drift_s is None else max_ts_drift_s
         self._buf: deque[tuple[float, float, float]] = deque()  # (epoch, price, volume)
+        self._last_ts: float | None = None   # latest accepted tick epoch
 
     def _prune(self, now_epoch: float) -> None:
         cutoff = now_epoch - self.window_s
@@ -53,10 +61,17 @@ class TickSanitizer:
         Rejected ticks are NOT added to the window.
         """
         epoch = ts.timestamp()
+
+        # timestamp anomaly: a tick dated too far from the latest seen is
+        # rejected before it can prune the window and warm-up-accept a bad price.
+        if self._last_ts is not None and abs(epoch - self._last_ts) > self.max_ts_drift_s:
+            return False
+
         self._prune(epoch)
 
         if len(self._buf) < self.min_samples:
             self._buf.append((epoch, price, volume))   # warm-up: accept + learn
+            self._last_ts = max(self._last_ts or epoch, epoch)
             return True
 
         ref, std = self._reference()
@@ -64,4 +79,5 @@ class TickSanitizer:
             return False   # outlier — drop, do not poison the window
 
         self._buf.append((epoch, price, volume))
+        self._last_ts = max(self._last_ts or epoch, epoch)
         return True

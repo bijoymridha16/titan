@@ -43,11 +43,40 @@ def test_normal_drift_accepted():
 
 
 def test_window_prunes_old_ticks():
-    san = TickSanitizer(n_sigma=4.0, window_s=10, min_samples=5)
+    # max_ts_drift_s set wide so this isolates window-pruning from the ts guard.
+    san = TickSanitizer(n_sigma=4.0, window_s=10, min_samples=5, max_ts_drift_s=10_000)
     for i in range(5):
         san.accept(_ts(i), 100.0)
     # 60s later the old ticks are pruned → back to warm-up → accept-all
     assert san.accept(_ts(100), 5_000.0) is True
+
+
+def test_rejects_far_future_timestamp_corruption():
+    # regression: a corrupt tick dated far ahead must NOT prune the window and
+    # warm-up-accept its bad price (live finding 2026-06-20).
+    san = TickSanitizer(n_sigma=4.0, window_s=300, min_samples=20)
+    for i in range(30):
+        san.accept(_ts(i), 100.0 + (i % 2) * 0.1)
+    # tick dated 13 min ahead with an absurd price → rejected on the ts guard
+    assert san.accept(_ts(30 + 13 * 60), 999_999.0) is False
+    # normal progression still accepted
+    assert san.accept(_ts(31), 100.05) is True
+
+
+def test_rejects_far_past_timestamp_replay():
+    san = TickSanitizer(n_sigma=4.0, window_s=300, min_samples=20)
+    for i in range(30):
+        san.accept(_ts(100 + i), 100.0)
+    # replayed/stale tick from 10 min before the latest seen → rejected
+    assert san.accept(_ts(100 + 29 - 600), 100.0) is False
+
+
+def test_legit_forward_progress_within_drift_ok():
+    san = TickSanitizer(n_sigma=4.0, window_s=300, min_samples=5)
+    # ticks 60s apart (within 300s drift) advance fine
+    price = 100.0
+    for i in range(20):
+        assert san.accept(_ts(i * 60), price + i * 0.01) is True
 
 
 def test_volume_weighted_reference_used():
