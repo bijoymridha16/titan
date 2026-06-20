@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # double-fire before the order is reconciled.
     order_lock_ttl_s: int = 30
 
+    # ─── OPS throttle (manifesto Scenario B: 2026 rate caps) ───
+    # Client-side token bucket so order dispatch never exceeds the per-segment
+    # orders-per-second cap. max_ops = sustained rate; ops_burst = max burst.
+    max_ops: float = 10.0
+    ops_burst: int = 10
+
     universe: str = "NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK"
 
     # How an index/underlying signal is actually EXECUTED (D1). Default ETF —

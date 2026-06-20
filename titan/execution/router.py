@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from titan.brokers.base import BrokerAdapter, Order, OrderSide, OrderStatus, OrderType, Product
 from titan.config import settings
 from titan.execution.locks import acquire_order_lock, order_lock_key, release_order_lock
+from titan.execution.rate_limit import AsyncRateLimiter
 from titan.risk.engine import RiskEngine
 from titan.risk.sizing import fixed_fractional_qty
 from titan.strategies.base import Signal, SignalKind
@@ -30,13 +31,16 @@ class ExecutionResult:
 
 class ExecutionRouter:
     def __init__(self, broker: BrokerAdapter, risk: RiskEngine, lot_size: int = 1,
-                 redis_client=None):
+                 redis_client=None, rate_limiter: AsyncRateLimiter | None = None):
         self.broker = broker
         self.risk = risk
         self.lot_size = lot_size
         # Optional Redis client for the distributed dispatch lock. None → the
         # idempotency guard is a no-op (single-process/test mode).
         self.r = redis_client
+        # Client-side OPS throttle (Scenario B). Defaults to the configured cap.
+        self.rate_limiter = rate_limiter or AsyncRateLimiter(
+            settings.max_ops, settings.ops_burst)
 
     async def submit(self, signal: Signal, strategy_name: str) -> ExecutionResult:
         if signal.kind == SignalKind.EXIT:
@@ -79,6 +83,10 @@ class ExecutionRouter:
             log.warning("dispatch already in flight for %s/%s — refusing duplicate",
                         strategy_name, signal.symbol)
             return ExecutionResult(signal, order, False, "dispatch in flight (lock held)")
+
+        # OPS throttle: stagger sends to stay under the per-segment cap. Keyed by
+        # product (a coarse exchange-segment proxy); waits for a free token.
+        await self.rate_limiter.acquire(order.product.value)
 
         try:
             placed = await self.broker.place_order(order)
