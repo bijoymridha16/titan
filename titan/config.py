@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     db_url: str = "postgresql+psycopg://titan:titan@localhost:5432/titan"
     redis_url: str = "redis://localhost:6379/0"
 
+    # ─── feed resilience (manifesto Scenario A) ───
+    # Two-stage staleness handling. The SOFT threshold reacts fast: when no tick
+    # heartbeat has arrived for this many seconds the supervisor bridges the gap
+    # with REST LTP polling (keeps downstream + heartbeat alive) WHILE the WS
+    # tries to recover — far less disruptive than a full restart. The HARD
+    # threshold is the give-up point: restart the feed process with backoff.
+    feed_rest_bridge_after_s: int = 5    # soft → REST LTP bridge
+    feed_stale_after_s: int = 30         # hard → restart feed process
+    feed_rest_fallback: bool = True      # master switch for the REST bridge
+
     universe: str = "NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK"
 
     # How an index/underlying signal is actually EXECUTED (D1). Default ETF —

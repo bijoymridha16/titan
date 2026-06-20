@@ -50,3 +50,24 @@ def test_heartbeat_age_computed():
     old = (datetime.utcnow() - timedelta(seconds=42)).isoformat()
     age = fs.heartbeat_age_s(_FakeRedis({"titan:heartbeat:feed": old}))
     assert age is not None and 40 < age < 60
+
+
+# ── two-stage staleness policy (manifesto Scenario A) ──
+
+def test_feed_action_fresh_is_ok():
+    assert fs.feed_action(2.0, bridge_after=5, restart_after=30) == "ok"
+
+
+def test_feed_action_none_age_is_ok():
+    # never-seen heartbeat (feed still warming up) must not trigger a restart
+    assert fs.feed_action(None, bridge_after=5, restart_after=30) == "ok"
+
+
+def test_feed_action_soft_stale_bridges():
+    assert fs.feed_action(5.0, bridge_after=5, restart_after=30) == "bridge"
+    assert fs.feed_action(29.9, bridge_after=5, restart_after=30) == "bridge"
+
+
+def test_feed_action_hard_stale_restarts():
+    assert fs.feed_action(30.0, bridge_after=5, restart_after=30) == "restart"
+    assert fs.feed_action(120.0, bridge_after=5, restart_after=30) == "restart"

@@ -35,10 +35,26 @@ HEARTBEAT_KEY = "titan:heartbeat:feed"
 STATUS_KEY = "titan:feed:status"
 AGE_KEY = "titan:feed:age_s"
 
-STALE_AFTER_S = 30          # no tick heartbeat for this long during a session → restart
 POLL_S = 5
 BACKOFF_START_S = 5
 BACKOFF_MAX_S = 60
+
+
+def feed_action(age: float | None, bridge_after: float, restart_after: float) -> str:
+    """Pure decision: what to do given the heartbeat age (seconds since last tick).
+
+    Returns one of: "ok" (fresh), "bridge" (soft-stale → REST LTP poll),
+    "restart" (hard-stale → recycle the feed process). `age is None` means we
+    have never seen a heartbeat yet, which is treated as "ok" (the feed may be
+    starting up — the restart timer only runs against a real, stale heartbeat).
+    """
+    if age is None:
+        return "ok"
+    if age >= restart_after:
+        return "restart"
+    if age >= bridge_after:
+        return "bridge"
+    return "ok"
 
 
 def heartbeat_age_s(r) -> float | None:
@@ -66,6 +82,21 @@ class FeedSupervisor:
         self.r = redis.from_url(settings.redis_url, decode_responses=True)
         self.proc: subprocess.Popen | None = None
         self.backoff = BACKOFF_START_S
+        self._bridge = None   # lazily created LtpBridge (REST fallback)
+
+    def _bridge_ltp(self) -> int:
+        """Bridge the data gap with REST LTP polling. Lazily constructs the
+        bridge so a supervisor with the fallback disabled never logs in."""
+        if not settings.feed_rest_fallback:
+            return 0
+        if self._bridge is None:
+            from titan.data.rest_fallback import LtpBridge
+            self._bridge = LtpBridge()
+        try:
+            return self._bridge.poll_once(self.r)
+        except Exception as e:
+            log.warning("REST bridge poll failed: %s", e)
+            return 0
 
     def _alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -105,9 +136,11 @@ class FeedSupervisor:
             self._publish("RUNNING", None)
             return
 
-        # running — check staleness
+        # running — check staleness with the two-stage policy
         age = heartbeat_age_s(self.r)
-        if age is not None and age > STALE_AFTER_S:
+        action = feed_action(age, settings.feed_rest_bridge_after_s,
+                             settings.feed_stale_after_s)
+        if action == "restart":
             log.warning("feed stale (%.0fs since last tick) — restarting (backoff %ds)",
                         age, self.backoff)
             self._publish("STALE", age)
@@ -115,6 +148,12 @@ class FeedSupervisor:
             _time.sleep(self.backoff)
             self.backoff = min(self.backoff * 2, BACKOFF_MAX_S)
             self._start()
+        elif action == "bridge":
+            # soft-stale: WS quiet but not dead — bridge with REST LTP so
+            # downstream keeps receiving prices while the socket recovers.
+            n = self._bridge_ltp()
+            log.warning("feed soft-stale (%.0fs) — REST-bridged %d symbols", age, n)
+            self._publish("BRIDGING", age)
         else:
             self._publish("RUNNING", age)
 
