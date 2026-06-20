@@ -55,6 +55,15 @@ class Feed:
             # dashboard) keys everything by the universe name. Mismatch here means
             # real ticks land under ticks:"Nifty 50" and nothing downstream sees them.
             tok_map[str(ins["token"])] = ins.get("name") or ins["symbol"]
+        # Invariant: every configured short symbol must resolve to a token.
+        # If this fails the feed will write ticks under the wrong key and ORB,
+        # bar_writer and the dashboard will silently read stale data.
+        mapped = set(tok_map.values())
+        missing = [s for s in settings.symbols if s not in mapped]
+        if missing:
+            raise RuntimeError(
+                f"feed cannot start: symbols not resolved in instrument master: {missing}. "
+                f"run `python -m titan.data.instruments` to refresh.")
         token_list = [{"exchangeType": k, "tokens": v} for k, v in by_exch.items()]
         return token_list, tok_map
 
@@ -62,7 +71,7 @@ class Feed:
     def on_open(self, wsapp):
         log.info("WS open; subscribing")
         token_list, self.token_to_symbol = self._build_subscriptions()
-        self.r.set("titan:heartbeat:feed", datetime.utcnow().isoformat())
+        self.r.set("titan:heartbeat:feed", datetime.now(timezone.utc).isoformat())
         self.ws.subscribe(CORRELATION_ID, MODE_QUOTE, token_list)
 
     def on_data(self, wsapp, message):
@@ -87,7 +96,7 @@ class Feed:
         self.r.xadd(f"ticks:{symbol}", {"data": json.dumps(tick)},
                     maxlen=10_000, approximate=True)
         self.r.set(f"titan:ltp:{symbol}", ltp)
-        self.r.set("titan:heartbeat:feed", datetime.utcnow().isoformat())
+        self.r.set("titan:heartbeat:feed", datetime.now(timezone.utc).isoformat())
 
     def on_error(self, wsapp, error):
         log.error("WS error: %s", error)

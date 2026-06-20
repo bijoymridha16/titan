@@ -73,7 +73,7 @@ class SynthFeed:
             self.r.xadd(f"ticks:{s}", {"data": json.dumps(tick)},
                         maxlen=20_000, approximate=True)
             self.r.set(f"titan:ltp:{s}", float(round(p, 2)))
-        self.r.set("titan:heartbeat:feed", datetime.utcnow().isoformat())
+        self.r.set("titan:heartbeat:feed", datetime.now(timezone.utc).isoformat())
         self.sim_now += self.sim_step
         # Wrap 15:30 IST (10:00 UTC) → next day's 09:15 IST (03:45 UTC) so
         # ORB / session-bound strategies keep firing on overnight demos.

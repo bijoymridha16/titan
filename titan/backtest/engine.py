@@ -235,7 +235,8 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame,
                 # position can't be sized beyond what the account could carry.
                 qty_pos = int((equity * min(max_position_pct, 1.0) * leverage) / sig.entry)
                 qty = max(1, min(qty_risk, qty_pos))
-                # fill at NEXT bar open (no look-ahead); slippage against direction
+                # fill at NEXT bar open (no look-ahead). LONG pays the spread up,
+                # SHORT receives the spread down.
                 slip = (1 + slippage_bps / 1e4) if is_long else (1 - slippage_bps / 1e4)
                 fill_px = float(next_bar["o"]) * slip
                 open_trade = BTTrade(
