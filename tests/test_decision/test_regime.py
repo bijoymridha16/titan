@@ -89,6 +89,36 @@ def test_determinism_same_input_same_output():
     assert a.adx == b.adx
 
 
+def test_news_override_forces_crisis_even_on_trend():
+    clf = RegimeClassifier("NIFTY")
+    bars = _bars(np.linspace(24000, 25200, 250))   # would be TREND
+    r = clf.classify(bars, _now(10, 30), news_neg_p=0.92)
+    assert r.regime == Regime.CRISIS
+    assert "FinBERT" in r.reason
+    assert r.features.get("news_neg_p") == 0.92
+
+
+def test_news_override_below_threshold_ignored():
+    clf = RegimeClassifier("NIFTY")
+    bars = _bars(np.linspace(24000, 25200, 250))
+    r = clf.classify(bars, _now(10, 30), news_neg_p=0.50)   # below 0.85
+    assert r.regime == Regime.TREND
+
+
+def test_news_override_fires_on_thin_bars():
+    # a shock must disarm even before enough bars exist to classify
+    clf = RegimeClassifier("NIFTY")
+    r = clf.classify(_bars([24000, 24010, 24005]), _now(10, 0), news_neg_p=0.90)
+    assert r.regime == Regime.CRISIS
+
+
+def test_news_override_cannot_trade_when_closed():
+    clf = RegimeClassifier("NIFTY")
+    bars = _bars(np.linspace(24000, 25200, 250))
+    r = clf.classify(bars, _now(8, 0), news_neg_p=0.99)   # pre-open
+    assert r.regime == Regime.CLOSED
+
+
 def test_insufficient_bars_defaults_transition_not_crash():
     clf = RegimeClassifier("NIFTY")
     r = clf.classify(_bars([24000, 24010, 24005]), _now(10, 0))

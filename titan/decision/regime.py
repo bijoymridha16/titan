@@ -194,7 +194,8 @@ class RegimeClassifier:
         self.ref_symbol = ref_symbol or settings.autopilot_ref_symbol
 
     def classify(self, bars: pd.DataFrame, now_ist: datetime,
-                 india_vix: Optional[float] = None) -> RegimeReading:
+                 india_vix: Optional[float] = None,
+                 news_neg_p: Optional[float] = None) -> RegimeReading:
         phase = session_phase(now_ist)
 
         # 1) Outside the tradable session → CLOSED, regardless of any indicator.
@@ -203,6 +204,18 @@ class RegimeClassifier:
                 regime=Regime.CLOSED, session_phase=phase, ref_symbol=self.ref_symbol,
                 india_vix=india_vix,
                 reason=f"session phase {phase} — outside tradable window",
+            )
+
+        # 1b) Predictive news override (Multiplier 2). A strong negative FinBERT
+        # reading forces CRISIS *ahead* of lagging ADX/ATR — fires even on thin
+        # bars, so a shock disarms trend strategies before price reflects it.
+        if (settings.regime_news_override and news_neg_p is not None
+                and news_neg_p >= settings.regime_news_crisis_p):
+            return RegimeReading(
+                regime=Regime.CRISIS, session_phase=phase, ref_symbol=self.ref_symbol,
+                india_vix=india_vix, features={"news_neg_p": news_neg_p},
+                reason=(f"CRISIS: FinBERT negative sentiment p={news_neg_p:.2f} ≥ "
+                        f"{settings.regime_news_crisis_p} — preemptive, arm nothing"),
             )
 
         if bars is None or bars.empty or len(bars) < 20:

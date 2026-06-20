@@ -181,6 +181,13 @@ class Settings(BaseSettings):
     regime_vix_crisis: float = 25.0     # India VIX >= this → crisis (only if VIX feed present)
     regime_lookback_bars: int = 200     # window for ADX / vol percentile
 
+    # ─── predictive news override (manifesto Multiplier 2: FinBERT) ───
+    # When the live FinBERT negative-sentiment probability for the universe
+    # reaches this, force CRISIS *before* lagging ADX/ATR confirm — disarming
+    # trend strategies ahead of the price move. Fed via Redis `titan:news:neg_p`.
+    regime_news_override: bool = True
+    regime_news_crisis_p: float = 0.85
+
     @property
     def autopilot_validated_set(self) -> set[str]:
         return {s.strip() for s in self.autopilot_validated.split(",") if s.strip()}

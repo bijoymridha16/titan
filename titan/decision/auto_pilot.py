@@ -86,6 +86,10 @@ class AutoPilot:
         except (TypeError, ValueError):
             return None
 
+    def _news_neg_p(self) -> float | None:
+        from titan.news.sentiment_stream import latest_neg_p
+        return latest_neg_p(self.r)
+
     def _armed(self) -> bool:
         flag = self.r.get(AUTOPILOT_KEY)
         if flag is not None:
@@ -111,7 +115,8 @@ class AutoPilot:
 
         bars = self._load_ref_bars()
         vix = self._india_vix()
-        reading = self.classifier.classify(bars, now, india_vix=vix)
+        news_neg_p = self._news_neg_p()
+        reading = self.classifier.classify(bars, now, india_vix=vix, news_neg_p=news_neg_p)
         self.selector.decide(reading, apply=armed)
 
     def run(self) -> None:
