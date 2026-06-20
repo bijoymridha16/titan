@@ -50,6 +50,7 @@ LTP_PATH = "/rest/secure/angelbroking/order/v1/getLtpData"
 PLACE_ORDER_PATH = "/rest/secure/angelbroking/order/v1/placeOrder"
 CANCEL_ORDER_PATH = "/rest/secure/angelbroking/order/v1/cancelOrder"
 ORDER_BOOK_PATH = "/rest/secure/angelbroking/order/v1/getOrderBook"
+ORDER_DETAILS_PATH = "/rest/secure/angelbroking/order/v1/details"
 POSITIONS_PATH = "/rest/secure/angelbroking/order/v1/getPosition"
 
 WS_URL = "wss://smartapisocket.angelone.in/smart-stream"
@@ -125,6 +126,19 @@ class AngelOneBroker(BrokerAdapter):
     @property
     def feed_token(self) -> str | None:
         return self._feed_token
+
+    async def get_order_details(self, unique_order_id: str) -> dict | None:
+        """Reconcile an ambiguous dispatch: fetch the authoritative order state
+        from `/details/{UniqueOrderID}` (manifesto Scenario A). Best-effort —
+        returns the order dict, or None if it can't be resolved."""
+        self._ensure_token()
+        try:
+            r = self._client.get(f"{ORDER_DETAILS_PATH}/{unique_order_id}",
+                                 headers=self._auth_headers(), timeout=10.0)
+            return self._unwrap(r, "orderDetails")
+        except Exception as e:
+            log.warning("order details lookup failed for %s: %s", unique_order_id, e)
+            return None
 
     # ─────────────── live order path ───────────────
     # Multiple safety gates. ALL must pass or the order is rejected before

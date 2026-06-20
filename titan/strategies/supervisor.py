@@ -107,7 +107,8 @@ class Supervisor:
             now_fn=lambda: clock.trading_now(self.r_sync),
             sim_mode_fn=lambda: clock.sim_mode(self.r_sync),
         )
-        self.router = ExecutionRouter(self.broker, self.risk, lot_size=1)
+        self.router = ExecutionRouter(self.broker, self.risk, lot_size=1,
+                                      redis_client=self.r_sync)
 
         # ─── shadow live broker (paper+dry-run parallel rehearsal) ───
         # When TITAN_LIVE_ENABLED=1 + TITAN_LIVE_DRY_RUN=1, every paper fill

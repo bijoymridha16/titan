@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     tick_filter_window_s: int = 300      # trailing window for VWAP / std (5 min)
     tick_filter_min_samples: int = 20    # accept-all until the window has this many
 
+    # ─── order idempotency (manifesto Scenario A) ───
+    # TTL of the per-(strategy,symbol) dispatch lock. Held during send; kept for
+    # the full TTL if the broker response is ambiguous (timeout) so a retry can't
+    # double-fire before the order is reconciled.
+    order_lock_ttl_s: int = 30
+
     universe: str = "NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK"
 
     # How an index/underlying signal is actually EXECUTED (D1). Default ETF —

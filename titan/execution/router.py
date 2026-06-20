@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 
 from titan.brokers.base import BrokerAdapter, Order, OrderSide, OrderStatus, OrderType, Product
+from titan.config import settings
+from titan.execution.locks import acquire_order_lock, order_lock_key, release_order_lock
 from titan.risk.engine import RiskEngine
 from titan.risk.sizing import fixed_fractional_qty
 from titan.strategies.base import Signal, SignalKind
@@ -27,10 +29,14 @@ class ExecutionResult:
 
 
 class ExecutionRouter:
-    def __init__(self, broker: BrokerAdapter, risk: RiskEngine, lot_size: int = 1):
+    def __init__(self, broker: BrokerAdapter, risk: RiskEngine, lot_size: int = 1,
+                 redis_client=None):
         self.broker = broker
         self.risk = risk
         self.lot_size = lot_size
+        # Optional Redis client for the distributed dispatch lock. None → the
+        # idempotency guard is a no-op (single-process/test mode).
+        self.r = redis_client
 
     async def submit(self, signal: Signal, strategy_name: str) -> ExecutionResult:
         if signal.kind == SignalKind.EXIT:
@@ -67,7 +73,26 @@ class ExecutionRouter:
         if decision.adjusted_qty:
             order.qty = decision.adjusted_qty
 
-        placed = await self.broker.place_order(order)
+        # ── idempotency: lock this (strategy, symbol) dispatch ──
+        lock_key = order_lock_key(strategy_name, signal.symbol)
+        if not acquire_order_lock(self.r, lock_key, settings.order_lock_ttl_s, order.id):
+            log.warning("dispatch already in flight for %s/%s — refusing duplicate",
+                        strategy_name, signal.symbol)
+            return ExecutionResult(signal, order, False, "dispatch in flight (lock held)")
+
+        try:
+            placed = await self.broker.place_order(order)
+        except Exception as e:
+            # AMBIGUOUS: we don't know if the order reached the exchange. Keep the
+            # lock for its full TTL so a retry can't double-fire; the order must be
+            # reconciled via broker order details before the symbol is freed.
+            log.exception("place_order ambiguous for %s — lock held for reconciliation",
+                          order.id)
+            return ExecutionResult(signal, order, False,
+                                   f"dispatch ambiguous, lock held for reconciliation: {e}")
+
+        # definite response → release the lock
+        release_order_lock(self.r, lock_key)
         if placed.status == OrderStatus.REJECTED:
             return ExecutionResult(signal, placed, False, placed.reject_reason)
         return ExecutionResult(signal, placed, True)
