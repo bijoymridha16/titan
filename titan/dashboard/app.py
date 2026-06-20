@@ -326,7 +326,10 @@ feed_hb = r.get("titan:heartbeat:feed")
 feed_alive = False
 if feed_hb:
     try:
-        age = (datetime.utcnow() - datetime.fromisoformat(feed_hb)).total_seconds()
+        hb_dt = datetime.fromisoformat(feed_hb)
+        if hb_dt.tzinfo is None:
+            hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - hb_dt).total_seconds()
         feed_alive = age < 60
     except Exception:
         pass
@@ -504,7 +507,7 @@ with tab_chart:
     fallback_px = None
     if px is None:
         try:
-            preview = _synthetic_bars(symbol, tf, bars_n) if df.empty else df
+            preview = _synthetic_bars(symbol, tf, bars_n)
             fallback_px = float(preview["c"].iloc[-1])
             fallback_prev = float(preview["o"].iloc[max(0, len(preview) - 12)])
         except Exception:
@@ -733,7 +736,10 @@ with tab_strat:
         age = "—"; stale = True
         if hb:
             try:
-                secs = (datetime.utcnow() - datetime.fromisoformat(hb)).total_seconds()
+                hb_dt = datetime.fromisoformat(hb)
+                if hb_dt.tzinfo is None:
+                    hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+                secs = (datetime.now(timezone.utc) - hb_dt).total_seconds()
                 age = f"{secs:.0f}s ago"; stale = secs > 120
             except Exception: pass
         dot_cls = "dot-on" if (enabled and not stale) else ("dot-warn" if enabled else "dot-off")
@@ -757,20 +763,25 @@ with tab_strat:
           </div>
         </div>
         """, unsafe_allow_html=True)
+        # Redis is the source of truth: force session_state to match Redis
+        # before rendering. Without this, the toggle's persisted widget state
+        # disagrees with Redis on each rerun and the diff below fires /stop,
+        # silently wiping `titan:strategies:enabled` (2026-06-15 incident).
+        key = f"strat_{name}"
+        st.session_state[key] = enabled
         cc = st.columns([5, 1])
         # When auto-pilot is armed it owns strategy selection — manual toggles are
         # read-only so the dashboard can't fight the decision engine.
-        b = cc[1].toggle("enable", value=enabled, key=f"strat_{name}",
+        b = cc[1].toggle("enable", value=enabled, key=key,
                          disabled=killed or autopilot_armed,
                          help="killed by walk-forward" if killed
                          else ("managed by auto-pilot — disarm to toggle manually"
                                if autopilot_armed else None))
         if killed or autopilot_armed:
             continue
-        if b and not enabled:
-            api("POST", f"/strategies/{name}/start"); st.rerun()
-        elif not b and enabled:
-            api("POST", f"/strategies/{name}/stop"); st.rerun()
+        if b != enabled:
+            verb = "start" if b else "stop"
+            api("POST", f"/strategies/{name}/{verb}"); st.rerun()
 
 
 # ─── tab: analytics (surfaces the P5 capture: every signal, fill, decision) ───

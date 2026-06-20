@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from titan.brokers.base import (
@@ -71,7 +71,7 @@ class PaperBroker(BrokerAdapter):
             order.broker_order_id = f"PAPER-{order.id[:8]}"
             order.status = OrderStatus.FILLED
             order.avg_fill_price = round(fill, 4)
-            order.filled_at = datetime.utcnow()
+            order.filled_at = datetime.now(timezone.utc)
             self._orders[order.id] = order
             self._apply_fill(order)
             return order

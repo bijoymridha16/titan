@@ -17,3 +17,4 @@ models/
 .coverage
 htmlcov/
 node_modules/
+.claude/

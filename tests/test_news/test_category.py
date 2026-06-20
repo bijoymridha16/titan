@@ -4,7 +4,12 @@ from titan.news.category import NEVER_FIRE, classify
 def test_earnings():
     assert classify("Reliance reports Q1 profit up 22%, beats estimates") == "earnings"
     assert classify("HDFC Bank Q4FY26 results announced") == "earnings"
-    assert classify("Infosys cuts FY guidance to 4-6%") == "earnings"
+
+
+def test_guidance_is_its_own_category():
+    # v2 split: guidance changes get their own category (rubric treats
+    # guidance ±20 separately from earnings results).
+    assert classify("Infosys cuts FY guidance to 4-6%") == "guidance_down"
 
 
 def test_m_and_a():

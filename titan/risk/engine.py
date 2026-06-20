@@ -97,8 +97,9 @@ class RiskEngine:
 
     def check(self, order: Order, per_unit_risk: float, available_cash: float) -> RiskDecision:
         # (gate, sticky): sticky gates halt the rest of the trading day on a breach.
-        # Market-hours is TRANSIENT — "market closed" must not permanently halt the
-        # day (it reopens, and sim can be toggled), so it does not set halted_today.
+        # Transient gates (market-hours, concurrent-positions) must NOT permanently
+        # halt the day — the market reopens / sim can be toggled, and a concurrent
+        # cap clears as positions close — so they do not set halted_today.
         for check, sticky in (
             (self._check_kill, True),
             (self._check_session_halt, True),
@@ -109,7 +110,7 @@ class RiskEngine:
             (self._check_weekly_loss, True),
             (self._check_drawdown, True),
             (self._check_consecutive_losses, True),
-            (self._check_concurrent_positions, True),
+            (self._check_concurrent_positions, False),
         ):
             dec = check(order)
             if not dec.approved:

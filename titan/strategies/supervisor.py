@@ -20,6 +20,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 import pandas as pd
 import redis as _redis_sync
@@ -39,6 +42,8 @@ from titan.strategies.base import Signal, SignalKind, Strategy
 from titan.strategies.registry import BASE_STRATEGIES as STRATEGIES
 
 log = logging.getLogger(__name__)
+
+NON_TRADABLE_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
 
 # subscribe to (universe × timeframe used by strategies). 5m for intraday;
 # 1d for TSMOM. Bar writer needs to publish bars:<symbol>:1d on daily close.
@@ -75,10 +80,14 @@ class Supervisor:
     def __init__(self):
         self.r = aioredis.from_url(settings.redis_url, decode_responses=True)
         self.limits = RiskLimits.from_settings()
+        # Reconstruct equity from realized PnL so restarts don't reset to capital.
+        realized = self._realized_pnl_total()
+        current = settings.capital + realized
+        peak = self._peak_equity_seen(default=current)
         self.state = RiskState(
             starting_equity=settings.capital,
-            peak_equity=settings.capital,
-            current_equity=settings.capital,
+            peak_equity=peak,
+            current_equity=current,
         )
         # one PaperBroker shared (per-symbol LTP from Redis)
         self.broker = PaperBroker(
@@ -116,8 +125,10 @@ class Supervisor:
 
         # active strategy instances keyed by (name, symbol)
         self.strategies: dict[tuple[str, str], Strategy] = {}
-        # open trades by (strategy, symbol)
-        self.open_trades: dict[tuple[str, str], OpenTrade] = {}
+        # open trades by (strategy, symbol) — reload from DB so restarts
+        # don't lose track of in-flight positions
+        self.open_trades: dict[tuple[str, str], OpenTrade] = self._load_open_trades()
+        self.state.open_positions = len(self.open_trades)
         self._ltp_cache: dict[str, float] = {}
 
     # ─────────────── helpers ───────────────
@@ -151,6 +162,49 @@ class Supervisor:
                    "qty": t.qty, "side": t.side.value, "ets": t.entry_ts,
                    "ep": t.entry_price, "sl": t.stop, "tg": t.target,
                    "rg": t.regime})
+
+    def _load_open_trades(self) -> dict[tuple[str, str], OpenTrade]:
+        out: dict[tuple[str, str], OpenTrade] = {}
+        try:
+            with engine().begin() as cx:
+                rows = cx.execute(text("""
+                    SELECT id, strategy, symbol, side, qty, entry_price,
+                           stop_loss, target, entry_ts
+                    FROM trades WHERE exit_ts IS NULL
+                """)).all()
+            for r in rows:
+                side = OrderSide(r.side) if r.side in ("BUY", "SELL") else (
+                    OrderSide.BUY if r.side == "LONG" else OrderSide.SELL
+                )
+                out[(r.strategy, r.symbol)] = OpenTrade(
+                    id=str(r.id), strategy=r.strategy, symbol=r.symbol,
+                    side=side, qty=int(r.qty),
+                    entry_price=float(r.entry_price),
+                    stop=float(r.stop_loss) if r.stop_loss is not None else 0.0,
+                    target=float(r.target) if r.target is not None else None,
+                    entry_ts=r.entry_ts,
+                )
+        except Exception as e:
+            log.warning("could not reload open trades: %s", e)
+        return out
+
+    def _realized_pnl_total(self) -> float:
+        try:
+            with engine().begin() as cx:
+                row = cx.execute(text(
+                    "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+                )).scalar()
+            return float(row or 0.0)
+        except Exception:
+            return 0.0
+
+    def _peak_equity_seen(self, default: float) -> float:
+        try:
+            with engine().begin() as cx:
+                row = cx.execute(text("SELECT MAX(equity) FROM equity_curve")).scalar()
+            return float(row) if row is not None else default
+        except Exception:
+            return default
 
     def _persist_close(self, t: OpenTrade, exit_ts: datetime,
                        exit_price: float, exit_reason: str, pnl: float) -> None:
@@ -214,6 +268,8 @@ class Supervisor:
                                             reject_reason="exit but no open position",
                                             features=features)
                     continue
+                if sig.symbol in NON_TRADABLE_INDICES:
+                    continue  # indices used as regime input only; trade ETFs at this capital
                 if (name, symbol) in self.open_trades:
                     self._record_signal(name, sig, regime, accepted=False,
                                         reject_reason="position already open", features=features)
@@ -221,7 +277,7 @@ class Supervisor:
                 await self._open_position(name, sig, regime, features)
 
             await self.r.set(f"titan:heartbeat:{name}",
-                             datetime.utcnow().isoformat())
+                             datetime.now(timezone.utc).isoformat())
 
         await self._publish_session_state()
 
@@ -383,12 +439,108 @@ class Supervisor:
             except Exception as e:
                 log.warning("shadow exit failed: %s", e)
 
+    async def _flatten_all(self, reason: str) -> int:
+        """Close every open position at current LTP. Returns count closed.
+
+        Reason is persisted as exit_reason. Used by:
+          - _eod_scheduler  → reason="eod_flatten"
+          - _control_loop FLATTEN message → reason="manual_flatten"
+        """
+        if not self.open_trades:
+            return 0
+        await self._refresh_ltps()
+        ts = datetime.now(timezone.utc)
+        closed = 0
+        for key, t in list(self.open_trades.items()):
+            ltp = self._ltp_sync(t.symbol)
+            if ltp <= 0:
+                log.warning("flatten: no LTP for %s, skipping", t.symbol)
+                continue
+            close_side = OrderSide.SELL if t.side == OrderSide.BUY else OrderSide.BUY
+            try:
+                await self.broker.place_order(Order(
+                    symbol=t.symbol, side=close_side, qty=t.qty,
+                    order_type=OrderType.MARKET, product=Product.INTRADAY,
+                    price=ltp, strategy=t.strategy,
+                ))
+            except Exception as e:
+                log.exception("flatten: broker exit failed for %s: %s", t.symbol, e)
+                continue
+            sign = 1 if t.side == OrderSide.BUY else -1
+            pnl = (ltp - t.entry_price) * t.qty * sign
+            self.state.on_trade_closed(pnl)
+            try:
+                await self.r.set("titan:consec_losses",
+                                 str(self.state.consecutive_losses))
+            except Exception:
+                pass
+            self._persist_close(t, ts, ltp, reason, pnl)
+            del self.open_trades[key]
+            self.state.open_positions = len(self.open_trades)
+            closed += 1
+            log.info("FLATTEN %s %s @ %.2f  %s  pnl=%+.2f  eq=%.2f",
+                     t.strategy, t.symbol, ltp, reason, pnl,
+                     self.state.current_equity)
+        return closed
+
+    # ─────────────── background loops ───────────────
+    async def _control_loop(self):
+        """Consume titan:control channel (FLATTEN published by API /flatten)."""
+        pubsub = self.r.pubsub()
+        await pubsub.subscribe("titan:control")
+        log.info("supervisor subscribed to titan:control")
+        while True:
+            try:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=5.0)
+            except (asyncio.TimeoutError, _redis_sync.exceptions.TimeoutError):
+                continue
+            if not msg:
+                continue
+            data = msg.get("data")
+            if data == "FLATTEN":
+                log.info("control: FLATTEN received")
+                try:
+                    n = await self._flatten_all("manual_flatten")
+                    log.info("control: flattened %d positions", n)
+                except Exception as e:
+                    log.exception("control: flatten failed: %s", e)
+
+    async def _eod_scheduler(self):
+        """Sleep until intraday_square_off IST, then publish FLATTEN.
+
+        Going through the control channel (not calling _flatten_all directly)
+        means scheduled and manual flatten share one code path.
+        """
+        cutoff = settings.intraday_square_off  # time(15, 15) by default
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=cutoff.hour, minute=cutoff.minute,
+                                 second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            wait_s = (target - now).total_seconds()
+            log.info("eod scheduler: next flatten at %s IST (in %.0fs)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_s)
+            try:
+                await asyncio.sleep(wait_s)
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self.r.publish("titan:control", "FLATTEN")
+                log.info("eod scheduler: published FLATTEN at %s IST",
+                         datetime.now(IST).strftime("%H:%M:%S"))
+            except Exception as e:
+                log.exception("eod scheduler: publish failed: %s", e)
+            # avoid double-fire within same minute
+            await asyncio.sleep(60)
+
     # ─────────────── entrypoint ───────────────
-    async def run(self):
+    async def _bar_loop(self):
         pubsub = self.r.pubsub()
         channels = [f"bars:{s}:{tf}" for s in settings.symbols for tf in TIMEFRAMES]
         await pubsub.subscribe(*channels)
-        log.info("supervisor subscribed to %d channels", len(channels))
+        log.info("supervisor subscribed to %d bar channels", len(channels))
         while True:
             try:
                 msg = await pubsub.get_message(
@@ -407,6 +559,13 @@ class Supervisor:
                 await self._on_bar_event(symbol, tf, bar)
             except Exception as e:
                 log.exception("on_bar_event failed: %s", e)
+
+    async def run(self):
+        await asyncio.gather(
+            self._bar_loop(),
+            self._control_loop(),
+            self._eod_scheduler(),
+        )
 
 
 def main():
