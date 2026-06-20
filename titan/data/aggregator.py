@@ -27,7 +27,7 @@ class Bar:
     v: int
 
 
-_TF = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
+_TF = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1d": 86400}
 
 
 def _bucket_start(ts: datetime, seconds: int) -> datetime:
