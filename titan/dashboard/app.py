@@ -848,9 +848,41 @@ with tab_strat:
         if ap_c[1].button("Arm auto-pilot", type="primary", use_container_width=True):
             api("POST", "/autopilot/arm"); st.rerun()
 
-    st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
+
+    # per-strategy performance (closed trades) so the tab shows how each is doing
+    sdf = q("""SELECT strategy, count(*) n,
+                      round(100.0*count(*) FILTER (WHERE pnl>0)/NULLIF(count(*),0)) win_pct,
+                      round(sum(pnl)) net
+               FROM trades WHERE exit_ts IS NOT NULL GROUP BY strategy""")
+    stats = ({row.strategy: (int(row.n),
+                             None if row.win_pct is None else int(row.win_pct),
+                             float(row.net)) for row in sdf.itertuples()}
+             if not sdf.empty else {})
+
+    def _group(killed, enabled):
+        if killed:
+            return "killed"
+        if autopilot_armed:
+            return "active" if enabled else "available"
+        return "enabled" if enabled else "available"
+
+    group_hdr = {
+        "active": "🟢 ACTIVE NOW — auto-pilot is running these",
+        "available": ("AVAILABLE — armed in other regimes" if autopilot_armed
+                      else "AVAILABLE — flip the switch to enable"),
+        "enabled": "🟢 ENABLED",
+        "killed": "KILLED — blocked by the walk-forward guard",
+    }
+    cur_group = None
     for name, label, descr, killed in all_strats:
         enabled = name in on
+        grp = _group(killed, enabled)
+        if grp != cur_group:
+            cur_group = grp
+            st.markdown(f'<div class="muted" style="margin:14px 0 6px;font-size:0.7rem;'
+                        f'letter-spacing:.05em;">{group_hdr[grp]}</div>', unsafe_allow_html=True)
+
         hb = r.get(f"titan:heartbeat:{name}")
         age = "—"; stale = True
         if hb:
@@ -862,56 +894,48 @@ with tab_strat:
                 age = f"{secs:.0f}s ago"; stale = secs > 120
             except Exception: pass
         dot_cls = "dot-on" if (enabled and not stale) else ("dot-warn" if enabled else "dot-off")
-        # State wording differs under auto-pilot (it OWNS selection) vs manual.
         if killed:
             state_txt, state_cls = "KILLED", "dn"
         elif autopilot_armed:
-            state_txt, state_cls = ("🟢 ACTIVE", "up") if enabled else ("IDLE", "muted")
+            state_txt, state_cls = ("ACTIVE", "up") if enabled else ("IDLE", "muted")
         else:
-            state_txt, state_cls = ("ENABLED", "up") if enabled else ("DISABLED", "muted")
-        regs = regime_for.get(name, [])
-        regimes_txt = ", ".join(str(rg).split(".")[-1] for rg in regs) or "—"
-        # highlight whole card green when active under auto-pilot
-        border = "#16c784" if (enabled and autopilot_armed) else "#1f2740"
-        st.markdown(f"""
-        <div class="card" style="margin-bottom:10px;display:flex;
-                                  align-items:center;gap:18px;border-color:{border};">
-          <div style="flex:2;">
-            <div style="font-weight:700;font-size:1.0rem;">{label}</div>
-            <div class="muted" style="margin-top:2px;">{name} · {descr}</div>
-          </div>
-          <div style="flex:0.7;text-align:center;">
-            <div class="muted" style="font-size:0.7rem;">ARMED IN</div>
-            <div style="font-weight:600;font-size:0.8rem;">{regimes_txt}</div>
-          </div>
-          <div style="flex:0.6;text-align:center;">
-            <div class="muted" style="font-size:0.7rem;">HEARTBEAT</div>
-            <div style="font-weight:600;">{age}</div>
-          </div>
-          <div style="flex:0.6;text-align:center;">
-            <div class="muted" style="font-size:0.7rem;">STATE</div>
-            <div><span class="dot {dot_cls}"></span>
-                 <span class="{state_cls}">{state_txt}</span></div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-        # Redis is the source of truth: force session_state to match Redis
-        # before rendering. Without this, the toggle's persisted widget state
-        # disagrees with Redis on each rerun and the diff below fires /stop,
-        # silently wiping `titan:strategies:enabled` (2026-06-15 incident).
+            state_txt, state_cls = ("ENABLED", "up") if enabled else ("OFF", "muted")
+        regimes_txt = ", ".join(str(rg).split(".")[-1] for rg in regime_for.get(name, [])) or "—"
+
+        n, win, net = stats.get(name, (0, None, 0.0))
+        if n:
+            net_col = "#16c784" if net > 0 else ("#ea3943" if net < 0 else "#8a93a6")
+            perf_html = (f'{n} trades · {win if win is not None else 0}% win · '
+                         f'<span style="color:{net_col};font-weight:600;">₹{net:+,.0f}</span>')
+        else:
+            perf_html = '<span class="muted">no trades yet</span>'
+
+        c = st.columns([2.8, 1.1, 1.4, 1.8, 0.7])
+        c[0].markdown(f'<div style="font-weight:700;">{label}</div>'
+                      f'<div class="muted" style="font-size:0.74rem;">{descr}</div>',
+                      unsafe_allow_html=True)
+        c[1].markdown('<div class="muted" style="font-size:0.64rem;">ARMED IN</div>'
+                      f'<div style="font-size:0.8rem;">{regimes_txt}</div>', unsafe_allow_html=True)
+        c[2].markdown('<div class="muted" style="font-size:0.64rem;">STATE</div>'
+                      f'<div><span class="dot {dot_cls}"></span>'
+                      f'<span class="{state_cls}">{state_txt}</span> '
+                      f'<span class="muted" style="font-size:0.7rem;">· {age}</span></div>',
+                      unsafe_allow_html=True)
+        c[3].markdown('<div class="muted" style="font-size:0.64rem;">PERFORMANCE</div>'
+                      f'<div style="font-size:0.82rem;">{perf_html}</div>', unsafe_allow_html=True)
+
+        # Redis is the source of truth: sync session_state before rendering so the
+        # toggle never fires a spurious /stop that wipes the enabled set (2026-06-15).
         key = f"strat_{name}"
         st.session_state[key] = enabled
-        cc = st.columns([5, 1])
-        # When auto-pilot is armed it owns strategy selection — manual toggles are
-        # read-only so the dashboard can't fight the decision engine.
-        b = cc[1].toggle("enable", value=enabled, key=key,
-                         disabled=killed or autopilot_armed,
-                         help="killed by walk-forward" if killed
-                         else ("managed by auto-pilot — disarm to toggle manually"
-                               if autopilot_armed else None))
-        if killed or autopilot_armed:
-            continue
-        if b != enabled:
+        b = c[4].toggle("on", value=enabled, key=key, label_visibility="collapsed",
+                        disabled=killed or autopilot_armed,
+                        help="killed by walk-forward" if killed
+                        else ("auto-pilot controls this — disarm to toggle manually"
+                              if autopilot_armed else "enable / disable"))
+        st.markdown('<hr style="margin:2px 0 4px;border:none;border-top:1px solid #161c2b;">',
+                    unsafe_allow_html=True)
+        if not (killed or autopilot_armed) and b != enabled:
             verb = "start" if b else "stop"
             api("POST", f"/strategies/{name}/{verb}"); st.rerun()
 
