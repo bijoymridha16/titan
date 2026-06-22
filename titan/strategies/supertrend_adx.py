@@ -66,7 +66,11 @@ class SupertrendADX(Strategy):
     name = "supertrend_adx"
     timeframe = "5m"
 
-    DEFAULTS = {"st_period": 10, "st_mult": 3.0, "adx_period": 14, "adx_min": 20.0}
+    # target_r added: a profit target at target_r × stop-distance so the strategy
+    # can exit in profit, not only when the Supertrend line is breached (which on
+    # synthetic data meant 0% win). Set 0 to ride trend-only (old behaviour).
+    DEFAULTS = {"st_period": 10, "st_mult": 3.0, "adx_period": 14, "adx_min": 20.0,
+                "target_r": 2.0}
 
     def __init__(self, symbol: str, params: Optional[dict] = None):
         super().__init__(symbol, {**self.DEFAULTS, **(params or {})})
@@ -82,8 +86,11 @@ class SupertrendADX(Strategy):
             return []
         ts, c = bars.index[-1], float(bars["c"].iloc[-1])
         s = float(st.iloc[-1])
+        tr = float(self.params.get("target_r") or 0)
         if dirn.iloc[-1] == 1:
+            tgt = c + abs(c - s) * tr if tr else None
             return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=s,
-                           reason=f"ST flip long, ADX={adx.iloc[-1]:.1f}")]
+                           target=tgt, reason=f"ST flip long, ADX={adx.iloc[-1]:.1f}")]
+        tgt = c - abs(c - s) * tr if tr else None
         return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=s,
-                       reason=f"ST flip short, ADX={adx.iloc[-1]:.1f}")]
+                       target=tgt, reason=f"ST flip short, ADX={adx.iloc[-1]:.1f}")]

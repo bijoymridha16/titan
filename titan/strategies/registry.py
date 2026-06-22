@@ -23,7 +23,8 @@ from titan.strategies.orb import OpeningRangeBreakout
 from titan.strategies.supertrend_adx import SupertrendADX
 from titan.strategies.tsmom import TSMOM
 from titan.strategies.variants import (BollingerSqueeze, ConfirmationORB,
-                                       VWAPRevertRSI)
+                                       InsideBar, MACDCross, RSIDivergence,
+                                       StochRSIADX, SupertrendMulti, VWAPRevertRSI)
 from titan.strategies.vwap_revert import VWAPRevert
 
 # Named live-capable strategies (what the supervisor can instantiate by name).
@@ -43,6 +44,12 @@ BASE_STRATEGIES: dict[str, Type[Strategy]] = {
     "orb_confirmed": ConfirmationORB,
     "vwap_rsi": VWAPRevertRSI,
     "bb_squeeze": BollingerSqueeze,
+    # confirmation/new families from external research (docs/14)
+    "macd_cross": MACDCross,
+    "stoch_adx": StochRSIADX,
+    "rsi_divergence": RSIDivergence,
+    "supertrend_multi": SupertrendMulti,
+    "inside_bar": InsideBar,
 }
 
 # Killed by walk-forward — blocked at the API and never auto-armed.

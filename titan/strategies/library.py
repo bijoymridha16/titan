@@ -36,6 +36,14 @@ class _Base(Strategy):
         return entry - mult * a if direction > 0 else entry + mult * a
 
     @staticmethod
+    def _target(entry, stop, direction, target_r):
+        """ATR/R-multiple profit target so trend strategies can exit in profit,
+        not only at a stop. target_r is in units of the stop distance (R)."""
+        if not target_r:
+            return None
+        return entry + direction * abs(entry - stop) * float(target_r)
+
+    @staticmethod
     def _min_bars(*vals) -> int:
         return max(vals) + 2
 
@@ -43,7 +51,8 @@ class _Base(Strategy):
 class MACrossover(_Base):
     name = "ma_cross"
     family = "trend"
-    DEFAULTS = {"fast": 9, "slow": 21, "atr_period": 14, "atr_mult": 2.0}
+    # target_r added (was target-less → 0% win on synthetic data): a 2R ATR target.
+    DEFAULTS = {"fast": 9, "slow": 21, "atr_period": 14, "atr_mult": 2.0, "target_r": 2.0}
 
     def on_bar(self, bars: pd.DataFrame) -> list[Signal]:
         f, s = int(self.params["fast"]), int(self.params["slow"])
@@ -53,18 +62,19 @@ class MACrossover(_Base):
         up = ef.iloc[-1] > es.iloc[-1] and ef.iloc[-2] <= es.iloc[-2]
         dn = ef.iloc[-1] < es.iloc[-1] and ef.iloc[-2] >= es.iloc[-2]
         c = float(bars["c"].iloc[-1]); ts = bars.index[-1]
+        tr = self.params.get("target_r")
         if up and self._last_dir <= 0:
             stop = self._atr_stop(bars, c, +1, self.params["atr_mult"])
             if stop:
                 self._last_dir = 1
                 return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
-                               target=None, reason=f"EMA{f}>EMA{s}")]
+                               target=self._target(c, stop, +1, tr), reason=f"EMA{f}>EMA{s}")]
         if dn and self._last_dir >= 0:
             stop = self._atr_stop(bars, c, -1, self.params["atr_mult"])
             if stop:
                 self._last_dir = -1
                 return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
-                               target=None, reason=f"EMA{f}<EMA{s}")]
+                               target=self._target(c, stop, -1, tr), reason=f"EMA{f}<EMA{s}")]
         return []
 
 
@@ -158,7 +168,8 @@ class BollingerReversion(_Base):
 class MomentumROC(_Base):
     name = "momentum"
     family = "momentum"
-    DEFAULTS = {"lookback": 20, "atr_period": 14, "atr_mult": 2.0}
+    # target_r added (was target-less → 0% win on synthetic data).
+    DEFAULTS = {"lookback": 20, "atr_period": 14, "atr_mult": 2.0, "target_r": 2.0}
 
     def on_bar(self, bars: pd.DataFrame) -> list[Signal]:
         lb = int(self.params["lookback"])
@@ -169,18 +180,19 @@ class MomentumROC(_Base):
         if not (np.isfinite(cur) and np.isfinite(prev)):
             return []
         c = float(bars["c"].iloc[-1]); ts = bars.index[-1]
+        tr = self.params.get("target_r")
         if cur > 0 >= prev and self._last_dir <= 0:  # momentum turns positive
             stop = self._atr_stop(bars, c, +1, self.params["atr_mult"])
             if stop:
                 self._last_dir = 1
                 return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
-                               target=None, reason=f"ROC{lb}>0")]
+                               target=self._target(c, stop, +1, tr), reason=f"ROC{lb}>0")]
         if cur < 0 <= prev and self._last_dir >= 0:  # momentum turns negative
             stop = self._atr_stop(bars, c, -1, self.params["atr_mult"])
             if stop:
                 self._last_dir = -1
                 return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
-                               target=None, reason=f"ROC{lb}<0")]
+                               target=self._target(c, stop, -1, tr), reason=f"ROC{lb}<0")]
         return []
 
 

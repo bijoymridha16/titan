@@ -39,12 +39,14 @@ ENABLED_KEY = "titan:strategies:enabled"
 #   crisis → flat ; transition → only the most-evidenced single strategy.
 REGIME_CANDIDATES: dict[Regime, set[str]] = {
     # trend / breakout / momentum styles
-    Regime.TREND: {"orb", "orb_confirmed", "supertrend_adx",
-                   "ma_cross", "donchian", "momentum"},
+    Regime.TREND: {"orb", "orb_confirmed", "supertrend_adx", "supertrend_multi",
+                   "ma_cross", "donchian", "momentum", "macd_cross", "stoch_adx"},
     # mean-reversion styles
-    Regime.RANGE: {"vwap_revert", "vwap_rsi", "rsi_revert", "bollinger_revert"},
+    Regime.RANGE: {"vwap_revert", "vwap_rsi", "rsi_revert", "bollinger_revert",
+                   "rsi_divergence"},
     # ambiguous: breakout-from-compression + confirmed breakout
-    Regime.TRANSITION: {"orb", "orb_confirmed", "donchian", "bb_squeeze"},
+    Regime.TRANSITION: {"orb", "orb_confirmed", "donchian", "bb_squeeze",
+                        "inside_bar", "stoch_adx", "rsi_divergence"},
     Regime.CRISIS: set(),
     Regime.CLOSED: set(),
 }

@@ -60,3 +60,66 @@ def donchian(bars: pd.DataFrame, period: int = 20):
     hi = bars["h"].astype(float).rolling(period).max().shift(1)
     lo = bars["l"].astype(float).rolling(period).min().shift(1)
     return hi, lo
+
+
+def macd(s: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Return (macd_line, signal_line, histogram)."""
+    s = s.astype(float)
+    line = ema(s, fast) - ema(s, slow)
+    sig = line.ewm(span=signal, adjust=False).mean()
+    return line, sig, line - sig
+
+
+def stoch_rsi(s: pd.Series, rsi_period: int = 14, stoch_period: int = 14,
+              k: int = 3, d: int = 3):
+    """Stochastic RSI → (%K, %D), 0..100. Stochastic oscillator applied to RSI."""
+    r = rsi(s, rsi_period)
+    lo = r.rolling(stoch_period).min()
+    hi = r.rolling(stoch_period).max()
+    sr = 100 * (r - lo) / (hi - lo).replace(0, np.nan)
+    kk = sr.rolling(k).mean()
+    dd = kk.rolling(d).mean()
+    return kk, dd
+
+
+def adx(bars: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average Directional Index (Wilder) — trend-strength, 0..100."""
+    h, l = bars["h"].astype(float), bars["l"].astype(float)
+    up, dn = h.diff(), -l.diff()
+    plus_dm = ((up > dn) & (up > 0)) * up
+    minus_dm = ((dn > up) & (dn > 0)) * dn
+    a = atr(bars, period)
+    plus_di = 100 * (plus_dm.rolling(period).mean() / a)
+    minus_di = 100 * (minus_dm.rolling(period).mean() / a)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.rolling(period).mean()
+
+
+def supertrend(bars: pd.DataFrame, period: int = 10, mult: float = 3.0):
+    """Return (line, direction) where direction is +1 (up) / -1 (down).
+    Volatility-adjusted trailing stop on hl2 ± mult·ATR."""
+    h, l, c = bars["h"].astype(float), bars["l"].astype(float), bars["c"].astype(float)
+    hl2 = (h + l) / 2.0
+    a = atr(bars, period)
+    upper, lower = hl2 + mult * a, hl2 - mult * a
+    line = pd.Series(index=bars.index, dtype=float)
+    direction = pd.Series(index=bars.index, dtype=float)
+    prev_line, prev_dir = None, -1
+    for i in range(len(bars)):
+        if prev_line is None or not np.isfinite(a.iloc[i]):
+            line.iloc[i] = upper.iloc[i]; direction.iloc[i] = -1
+            prev_line, prev_dir = line.iloc[i], -1
+            continue
+        if prev_dir == -1:
+            ln = min(upper.iloc[i], prev_line)
+            d = 1 if c.iloc[i] > ln else -1
+            if d == 1:
+                ln = lower.iloc[i]
+        else:
+            ln = max(lower.iloc[i], prev_line)
+            d = -1 if c.iloc[i] < ln else 1
+            if d == -1:
+                ln = upper.iloc[i]
+        line.iloc[i], direction.iloc[i] = ln, d
+        prev_line, prev_dir = ln, d
+    return line, direction

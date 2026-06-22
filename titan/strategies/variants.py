@@ -23,6 +23,7 @@ import pandas as pd
 
 from titan.strategies import indicators as ind
 from titan.strategies.base import Signal, SignalKind, Strategy
+from titan.strategies.library import _Base
 from titan.strategies.orb import OpeningRangeBreakout
 from titan.strategies.vwap_revert import VWAPRevert
 
@@ -118,4 +119,173 @@ class BollingerSqueeze(Strategy):
             return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c,
                            stop=c + mult * a, target=None,
                            reason=f"BB squeeze break dn (BBW≤p{int(self.params['squeeze_pctile']*100)})")]
+        return []
+
+
+class MACDCross(_Base):
+    """MACD line crossing its signal line (trend/momentum)."""
+    name = "macd_cross"
+    family = "trend"
+    DEFAULTS = {"fast": 12, "slow": 26, "signal": 9,
+                "atr_period": 14, "atr_mult": 2.0, "target_r": 2.0}
+
+    def on_bar(self, bars):
+        f, s, sg = (int(self.params[k]) for k in ("fast", "slow", "signal"))
+        if len(bars) < s + sg + 2:
+            return []
+        line, sig, _ = ind.macd(bars["c"], f, s, sg)
+        if not all(np.isfinite(x) for x in (line.iloc[-1], sig.iloc[-1], line.iloc[-2], sig.iloc[-2])):
+            return []
+        up = line.iloc[-1] > sig.iloc[-1] and line.iloc[-2] <= sig.iloc[-2]
+        dn = line.iloc[-1] < sig.iloc[-1] and line.iloc[-2] >= sig.iloc[-2]
+        c = float(bars["c"].iloc[-1]); ts = bars.index[-1]; tr = self.params.get("target_r")
+        if up and self._last_dir <= 0:
+            stop = self._atr_stop(bars, c, +1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = 1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
+                               target=self._target(c, stop, +1, tr), reason="MACD cross up")]
+        if dn and self._last_dir >= 0:
+            stop = self._atr_stop(bars, c, -1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = -1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
+                               target=self._target(c, stop, -1, tr), reason="MACD cross dn")]
+        return []
+
+
+class StochRSIADX(_Base):
+    """Stochastic-RSI %K/%D crossover, gated by ADX trend strength (only act when
+    a trend is present). Momentum-with-confirmation."""
+    name = "stoch_adx"
+    family = "momentum"
+    DEFAULTS = {"rsi_period": 14, "stoch_period": 14, "k": 3, "d": 3,
+                "adx_period": 14, "adx_min": 20.0,
+                "atr_period": 14, "atr_mult": 2.0, "target_r": 2.0}
+
+    def on_bar(self, bars):
+        need = max(self.params["rsi_period"] + self.params["stoch_period"],
+                   self.params["adx_period"] * 2) + 5
+        if len(bars) < need:
+            return []
+        kk, dd = ind.stoch_rsi(bars["c"], int(self.params["rsi_period"]),
+                               int(self.params["stoch_period"]),
+                               int(self.params["k"]), int(self.params["d"]))
+        a = ind.adx(bars, int(self.params["adx_period"])).iloc[-1]
+        if not (np.isfinite(kk.iloc[-1]) and np.isfinite(dd.iloc[-1])
+                and np.isfinite(kk.iloc[-2]) and np.isfinite(dd.iloc[-2]) and np.isfinite(a)):
+            return []
+        if a < self.params["adx_min"]:
+            return []
+        up = kk.iloc[-1] > dd.iloc[-1] and kk.iloc[-2] <= dd.iloc[-2] and kk.iloc[-1] < 50
+        dn = kk.iloc[-1] < dd.iloc[-1] and kk.iloc[-2] >= dd.iloc[-2] and kk.iloc[-1] > 50
+        c = float(bars["c"].iloc[-1]); ts = bars.index[-1]; tr = self.params.get("target_r")
+        if up and self._last_dir <= 0:
+            stop = self._atr_stop(bars, c, +1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = 1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
+                               target=self._target(c, stop, +1, tr), reason=f"StochRSI x up ADX={a:.0f}")]
+        if dn and self._last_dir >= 0:
+            stop = self._atr_stop(bars, c, -1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = -1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
+                               target=self._target(c, stop, -1, tr), reason=f"StochRSI x dn ADX={a:.0f}")]
+        return []
+
+
+class RSIDivergence(_Base):
+    """Lightweight RSI divergence: price makes a lower low while RSI makes a
+    higher low (bullish) / mirror for bearish. Mean-reversion at momentum
+    exhaustion."""
+    name = "rsi_divergence"
+    family = "mean_reversion"
+    DEFAULTS = {"rsi_period": 14, "lookback": 5,
+                "atr_period": 14, "atr_mult": 1.5, "target_r": 2.0}
+
+    def on_bar(self, bars):
+        p, lb = int(self.params["rsi_period"]), int(self.params["lookback"])
+        if len(bars) < p + lb + 2:
+            return []
+        r = ind.rsi(bars["c"], p)
+        c0, cprev = float(bars["c"].iloc[-1]), float(bars["c"].iloc[-1 - lb])
+        r0, rprev = r.iloc[-1], r.iloc[-1 - lb]
+        if not (np.isfinite(r0) and np.isfinite(rprev)):
+            return []
+        c = c0; ts = bars.index[-1]; tr = self.params.get("target_r")
+        bull = c0 < cprev and r0 > rprev and r0 < 45      # price down, momentum up
+        bear = c0 > cprev and r0 < rprev and r0 > 55       # price up, momentum down
+        if bull and self._last_dir <= 0:
+            stop = self._atr_stop(bars, c, +1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = 1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
+                               target=self._target(c, stop, +1, tr), reason="bullish RSI divergence")]
+        if bear and self._last_dir >= 0:
+            stop = self._atr_stop(bars, c, -1, self.params["atr_mult"])
+            if stop:
+                self._last_dir = -1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
+                               target=self._target(c, stop, -1, tr), reason="bearish RSI divergence")]
+        return []
+
+
+class SupertrendMulti(_Base):
+    """Two Supertrends (fast + slow) must AGREE on direction — filters the chop
+    that a single Supertrend gets whipsawed by."""
+    name = "supertrend_multi"
+    family = "trend"
+    DEFAULTS = {"p1": 10, "m1": 3.0, "p2": 20, "m2": 5.0,
+                "atr_period": 14, "target_r": 2.0}
+
+    def on_bar(self, bars):
+        if len(bars) < max(self.params["p1"], self.params["p2"]) * 3:
+            return []
+        l1, d1 = ind.supertrend(bars, int(self.params["p1"]), float(self.params["m1"]))
+        l2, d2 = ind.supertrend(bars, int(self.params["p2"]), float(self.params["m2"]))
+        if not (np.isfinite(l1.iloc[-1]) and np.isfinite(l2.iloc[-1])):
+            return []
+        long_now = d1.iloc[-1] == 1 and d2.iloc[-1] == 1
+        short_now = d1.iloc[-1] == -1 and d2.iloc[-1] == -1
+        c = float(bars["c"].iloc[-1]); ts = bars.index[-1]; tr = self.params.get("target_r")
+        if long_now and self._last_dir <= 0:
+            stop = min(float(l1.iloc[-1]), float(l2.iloc[-1]))
+            if stop < c:
+                self._last_dir = 1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=stop,
+                               target=self._target(c, stop, +1, tr), reason="2×Supertrend agree up")]
+        if short_now and self._last_dir >= 0:
+            stop = max(float(l1.iloc[-1]), float(l2.iloc[-1]))
+            if stop > c:
+                self._last_dir = -1
+                return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=stop,
+                               target=self._target(c, stop, -1, tr), reason="2×Supertrend agree dn")]
+        return []
+
+
+class InsideBar(_Base):
+    """Inside-bar breakout: when the previous bar is contained inside its mother
+    bar (volatility contraction), trade the break of the mother bar's range."""
+    name = "inside_bar"
+    family = "breakout"
+    DEFAULTS = {"atr_period": 14, "target_r": 2.0}
+
+    def on_bar(self, bars):
+        if len(bars) < max(4, self.params["atr_period"] + 2):
+            return []
+        mother, inside, cur = bars.iloc[-3], bars.iloc[-2], bars.iloc[-1]
+        is_inside = inside["h"] < mother["h"] and inside["l"] > mother["l"]
+        if not is_inside:
+            return []
+        c = float(cur["c"]); ts = bars.index[-1]; tr = self.params.get("target_r")
+        mh, ml = float(mother["h"]), float(mother["l"])
+        if c > mh and self._last_dir <= 0:
+            self._last_dir = 1
+            return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG, entry=c, stop=ml,
+                           target=self._target(c, ml, +1, tr), reason="inside-bar break up")]
+        if c < ml and self._last_dir >= 0:
+            self._last_dir = -1
+            return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT, entry=c, stop=mh,
+                           target=self._target(c, mh, -1, tr), reason="inside-bar break dn")]
         return []
