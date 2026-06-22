@@ -269,8 +269,15 @@ class Supervisor:
                                             reject_reason="exit but no open position",
                                             features=features)
                     continue
-                if sig.symbol in NON_TRADABLE_INDICES:
-                    continue  # indices used as regime input only; trade ETFs at this capital
+                if sig.symbol in NON_TRADABLE_INDICES and settings.live_enabled:
+                    # Indices aren't directly tradable on the live cash path at this
+                    # capital — block real orders and route via ETF/option instead.
+                    # In paper/sim we trade the index NOTIONALLY (PaperBroker fills
+                    # at index LTP) so strategies can be rehearsed on the index itself.
+                    self._record_signal(name, sig, regime, accepted=False,
+                                        reject_reason="non-tradable index (live) — route via ETF/option",
+                                        features=features)
+                    continue
                 if (name, symbol) in self.open_trades:
                     self._record_signal(name, sig, regime, accepted=False,
                                         reject_reason="position already open", features=features)
