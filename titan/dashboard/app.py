@@ -671,7 +671,8 @@ with tab_chart:
 # ─── tab: positions ───
 with tab_pos:
     df = q("""SELECT strategy, symbol, side, qty, entry_price AS entry,
-                     stop_loss AS sl, target, entry_ts
+                     stop_loss AS sl, target,
+                     (entry_ts AT TIME ZONE 'Asia/Kolkata') AS entry_ts
               FROM trades WHERE exit_ts IS NULL ORDER BY entry_ts DESC""")
     if df.empty:
         st.markdown('<div class="card" style="text-align:center;padding:30px;">'
@@ -683,7 +684,9 @@ with tab_pos:
 
 # ─── tab: journal ───
 with tab_journal:
-    df = q("""SELECT entry_ts, exit_ts, strategy, symbol, side, qty,
+    df = q("""SELECT (entry_ts AT TIME ZONE 'Asia/Kolkata') AS entry_ts,
+                     (exit_ts  AT TIME ZONE 'Asia/Kolkata') AS exit_ts,
+                     strategy, symbol, side, qty,
                      entry_price, exit_price, pnl, exit_reason
               FROM trades WHERE exit_ts IS NOT NULL
               ORDER BY exit_ts DESC LIMIT 100""")
@@ -874,7 +877,7 @@ with tab_analytics:
 
         # 3) recent rejected signals — "what we skipped, and why"
         st.markdown("##### Recent rejected signals (what we skipped & why)")
-        rj = q("""SELECT to_char(ts,'MM-DD HH24:MI') ts, strategy, symbol, kind,
+        rj = q("""SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata','MM-DD HH24:MI') ts, strategy, symbol, kind,
                          regime,
                          LEFT(split_part(reject_reason,'session halted: ',-1),60) reject_reason
                   FROM signals WHERE accepted=false ORDER BY ts DESC LIMIT 25""")
@@ -895,7 +898,8 @@ with tab_news:
     min_score = nf[2].slider("Min score", 0.0, 1.0, 0.0, 0.05, key="news_min_score")
 
     news_df = q("""
-        SELECT published_at, ticker, source, category,
+        SELECT (published_at AT TIME ZONE 'Asia/Kolkata') AS published_at,
+               ticker, source, category,
                sentiment_label, sentiment_score, entity_conf,
                would_fire, fire_reason, headline
         FROM news_signals
@@ -1010,7 +1014,7 @@ with tab_risk:
             api("POST", "/flatten")
 
     st.markdown("##### Recent risk events")
-    df = q("SELECT ts, kind, detail FROM risk_events ORDER BY ts DESC LIMIT 10")
+    df = q("SELECT (ts AT TIME ZONE 'Asia/Kolkata') AS ts, kind, detail FROM risk_events ORDER BY ts DESC LIMIT 10")
     if df.empty:
         st.markdown('<span class="muted">No events</span>', unsafe_allow_html=True)
     else:
