@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from titan.strategies import indicators as ind
 from titan.strategies.base import Signal, SignalKind, Strategy
 
 
@@ -24,7 +25,10 @@ class VWAPRevert(Strategy):
     name = "vwap_revert"
     timeframe = "5m"
 
-    DEFAULTS = {"k_sigma": 2.0, "atr_period": 14, "atr_mult": 1.0, "lookback": 20}
+    # rsi_gate is OFF by default → baseline behaviour is unchanged. The VWAPRevertRSI
+    # variant turns it on (and widens the stop) per the external-analysis triage.
+    DEFAULTS = {"k_sigma": 2.0, "atr_period": 14, "atr_mult": 1.0, "lookback": 20,
+                "rsi_gate": False, "rsi_period": 14, "rsi_hi": 65.0, "rsi_lo": 35.0}
 
     def __init__(self, symbol: str, params: Optional[dict] = None):
         super().__init__(symbol, {**self.DEFAULTS, **(params or {})})
@@ -60,12 +64,22 @@ class VWAPRevert(Strategy):
         if not np.isfinite(atr) or atr <= 0:
             return []
 
+        # optional RSI confirmation: only fade when momentum is also exhausted
+        # (overbought for shorts, oversold for longs). Off for the baseline.
+        rsi_ok_short = rsi_ok_long = True
+        if self.params.get("rsi_gate"):
+            rv = ind.rsi(bars["c"], int(self.params["rsi_period"])).iloc[-1]
+            if not np.isfinite(rv):
+                return []
+            rsi_ok_short = rv >= float(self.params["rsi_hi"])
+            rsi_ok_long = rv <= float(self.params["rsi_lo"])
+
         ts = bars.index[-1]
-        if z > k:
+        if z > k and rsi_ok_short:
             return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT,
                            entry=last_c, stop=last_c + self.params["atr_mult"] * atr,
                            target=float(vwap), reason=f"VWAP+{z:.1f}σ revert short")]
-        if z < -k:
+        if z < -k and rsi_ok_long:
             return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG,
                            entry=last_c, stop=last_c - self.params["atr_mult"] * atr,
                            target=float(vwap), reason=f"VWAP{z:.1f}σ revert long")]

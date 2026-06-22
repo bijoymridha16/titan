@@ -17,17 +17,32 @@ from typing import Type
 
 from titan.strategies.base import Strategy
 from titan.strategies.factory import VariantSpec, all_variants
+from titan.strategies.library import (BollingerReversion, DonchianBreakout,
+                                      MACrossover, MomentumROC, RSIReversion)
 from titan.strategies.orb import OpeningRangeBreakout
 from titan.strategies.supertrend_adx import SupertrendADX
 from titan.strategies.tsmom import TSMOM
+from titan.strategies.variants import (BollingerSqueeze, ConfirmationORB,
+                                       VWAPRevertRSI)
 from titan.strategies.vwap_revert import VWAPRevert
 
 # Named live-capable strategies (what the supervisor can instantiate by name).
 BASE_STRATEGIES: dict[str, Type[Strategy]] = {
+    # original baselines (kept stable for comparison)
     "orb": OpeningRangeBreakout,
     "vwap_revert": VWAPRevert,
     "supertrend_adx": SupertrendADX,
     "tsmom": TSMOM,
+    # activated library families (one canonical variant each)
+    "ma_cross": MACrossover,
+    "donchian": DonchianBreakout,
+    "rsi_revert": RSIReversion,
+    "bollinger_revert": BollingerReversion,
+    "momentum": MomentumROC,
+    # new structural variants (docs/13 triage)
+    "orb_confirmed": ConfirmationORB,
+    "vwap_rsi": VWAPRevertRSI,
+    "bb_squeeze": BollingerSqueeze,
 }
 
 # Killed by walk-forward — blocked at the API and never auto-armed.

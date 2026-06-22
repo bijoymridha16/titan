@@ -113,7 +113,7 @@ class OpeningRangeBreakout(Strategy):
         tgt_r = float(self.params["target_r"])
 
         signals: list[Signal] = []
-        if not self._state.long_taken and float(last["c"]) > hi:
+        if not self._state.long_taken and float(last["c"]) > hi and self._confirm(bars, +1):
             signals.append(Signal(
                 ts=ts_ist, symbol=self.symbol, kind=SignalKind.ENTRY_LONG,
                 entry=float(last["c"]), stop=lo,
@@ -121,7 +121,7 @@ class OpeningRangeBreakout(Strategy):
                 reason=f"ORB long: close>{hi:.2f}",
             ))
             self._state.long_taken = True
-        elif not self._state.short_taken and float(last["c"]) < lo:
+        elif not self._state.short_taken and float(last["c"]) < lo and self._confirm(bars, -1):
             signals.append(Signal(
                 ts=ts_ist, symbol=self.symbol, kind=SignalKind.ENTRY_SHORT,
                 entry=float(last["c"]), stop=hi,
@@ -130,3 +130,10 @@ class OpeningRangeBreakout(Strategy):
             ))
             self._state.short_taken = True
         return signals
+
+    def _confirm(self, bars: pd.DataFrame, direction: int) -> bool:
+        """Breakout-confirmation hook. Base ORB takes every breakout (no filter).
+        Subclasses (e.g. ConfirmationORB) override to require volume/trend
+        confirmation. If it returns False the breakout is skipped and may retry on
+        a later bar (the side is not marked taken)."""
+        return True
