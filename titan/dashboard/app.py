@@ -423,19 +423,36 @@ else:
 
 
 # ─────────────────────────── KPI row ───────────────────────────
-def latest_equity() -> float:
-    df = q("SELECT equity FROM equity_curve ORDER BY ts DESC LIMIT 1")
-    return float(df["equity"].iloc[0]) if not df.empty else settings.capital
-
-def today_pnl() -> float:
-    df = q("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades WHERE entry_ts::date = CURRENT_DATE")
+def today_realized_pnl() -> float:
+    # Realized pnl scope = trades that EXITED today (entry can be earlier).
+    df = q("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades WHERE exit_ts::date = CURRENT_DATE")
     return float(df["pnl"].iloc[0]) if not df.empty else 0.0
+
+def open_unrealized_pnl() -> float:
+    df = q("SELECT symbol, side, qty, entry_price FROM trades WHERE exit_ts IS NULL")
+    if df.empty:
+        return 0.0
+    total = 0.0
+    rc = _r()
+    for _, t in df.iterrows():
+        ltp = rc.get(f"titan:ltp:{t['symbol']}")
+        if not ltp:
+            continue
+        sign = 1 if str(t["side"]).upper() in ("BUY", "LONG") else -1
+        total += sign * (float(ltp) - float(t["entry_price"])) * int(t["qty"])
+    return total
 
 def open_count() -> int:
     df = q("SELECT COUNT(*) AS c FROM trades WHERE exit_ts IS NULL")
     return int(df["c"].iloc[0]) if not df.empty else 0
 
-equity = latest_equity(); pnl = today_pnl(); n_open = open_count()
+# Equity widget is today-scoped (matches Today P&L scope):
+# start_of_day = capital, equity_now = capital + today's realized + open unrealized.
+realized = today_realized_pnl()
+unrealized = open_unrealized_pnl()
+pnl = realized + unrealized           # today's mark-to-market PnL
+equity = settings.capital + pnl
+n_open = open_count()
 dd_pct = max(0.0, (settings.capital - equity) / settings.capital * 100)
 daily_cap = settings.capital * settings.max_daily_loss_pct / 100
 profit_target = settings.capital * settings.max_daily_profit_pct / 100
@@ -462,9 +479,10 @@ profit_pct_frac = (profit / profit_target) if profit_target else 0
 loss_pct_frac = (loss / daily_cap) if daily_cap else 0
 
 cards = [
-    kpi("Equity (₹)", f"{equity:,.0f}", f"{equity - settings.capital:+,.0f} vs start", eq_tone),
+    kpi("Equity (₹)", f"{equity:,.0f}",
+        f"{pnl:+,.0f} today ({realized:+,.0f} realized · {unrealized:+,.0f} open)", eq_tone),
     kpi("Today P&L (₹)", f"{pnl:+,.0f}",
-        ("🔒 profit locked" if profit_locked else ("⛔ loss halt" if loss_halted else "session active")),
+        ("🔒 profit locked" if profit_locked else ("⛔ loss halt" if loss_halted else "mark-to-market")),
         pnl_tone),
     kpi("Daily profit",
         f"₹{profit:,.0f}" + (" 🔒" if profit_locked else ""),

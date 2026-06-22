@@ -38,6 +38,7 @@ from titan.data.store import engine
 from titan.execution.router import ExecutionRouter
 from titan.risk.engine import RiskEngine, RiskState
 from titan.risk.limits import RiskLimits
+from titan.risk.state_store import persist_risk_state
 from titan.strategies.base import Signal, SignalKind, Strategy
 from titan.strategies.registry import BASE_STRATEGIES as STRATEGIES
 
@@ -74,6 +75,10 @@ class OpenTrade:
     target: Optional[float]
     entry_ts: datetime
     regime: Optional[str] = None
+    # Wall-clock timestamps for latency analysis. entry_ts above stays the BAR
+    # timestamp so candle alignment doesn't change.
+    signal_emitted_at: Optional[datetime] = None
+    order_filled_at: Optional[datetime] = None
 
 
 class Supervisor:
@@ -156,12 +161,15 @@ class Supervisor:
         with engine().begin() as cx:
             cx.execute(text("""
                 INSERT INTO trades (id, strategy, symbol, qty, side, entry_ts,
-                                    entry_price, stop_loss, target, regime, is_paper)
-                VALUES (:id, :strat, :sym, :qty, :side, :ets, :ep, :sl, :tg, :rg, true)
+                                    entry_price, stop_loss, target, regime, is_paper,
+                                    signal_emitted_at, order_filled_at)
+                VALUES (:id, :strat, :sym, :qty, :side, :ets, :ep, :sl, :tg, :rg, true,
+                        :sea, :ofa)
             """), {"id": t.id, "strat": t.strategy, "sym": t.symbol,
                    "qty": t.qty, "side": t.side.value, "ets": t.entry_ts,
                    "ep": t.entry_price, "sl": t.stop, "tg": t.target,
-                   "rg": t.regime})
+                   "rg": t.regime,
+                   "sea": t.signal_emitted_at, "ofa": t.order_filled_at})
 
     def _load_open_trades(self) -> dict[tuple[str, str], OpenTrade]:
         out: dict[tuple[str, str], OpenTrade] = {}
@@ -316,7 +324,9 @@ class Supervisor:
     async def _open_position(self, strategy_name: str, sig: Signal,
                              regime=None, features: dict | None = None) -> None:
         features = features or {}
+        signal_emitted_at = datetime.now(timezone.utc)
         res = await self.router.submit(sig, strategy_name)
+        order_filled_at = datetime.now(timezone.utc)
         order = res.order
         side = OrderSide.BUY if sig.kind == SignalKind.ENTRY_LONG else OrderSide.SELL
         filled = bool(res.approved and order and order.status == OrderStatus.FILLED)
@@ -354,6 +364,8 @@ class Supervisor:
             entry_price=res.order.avg_fill_price, stop=sig.stop, target=sig.target,
             entry_ts=_to_utc(sig.ts),  # market/bar time, so it aligns with candles
             regime=regime,
+            signal_emitted_at=signal_emitted_at,
+            order_filled_at=order_filled_at,
         )
         self.open_trades[(strategy_name, sig.symbol)] = t
         self._persist_open_trade(t)
@@ -470,10 +482,9 @@ class Supervisor:
             pnl = (ltp - t.entry_price) * t.qty * sign
             self.state.on_trade_closed(pnl)
             try:
-                await self.r.set("titan:consec_losses",
-                                 str(self.state.consecutive_losses))
-            except Exception:
-                pass
+                persist_risk_state(self.state, self.r_sync, datetime.now(IST).date())
+            except Exception as e:
+                log.warning("persist risk state failed: %s", e)
             self._persist_close(t, ts, ltp, reason, pnl)
             del self.open_trades[key]
             self.state.open_positions = len(self.open_trades)
