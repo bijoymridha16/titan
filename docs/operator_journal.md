@@ -112,3 +112,5 @@ FROM operator_decisions ORDER BY id;
 ```
 Cross-reference with `trades`, `signals`, `fills`, `regime_decisions` over the
 same window to test each `expected` hypothesis.
+
+### 2026-06-22 — Review #5 (decision #24): still halted (drawdown), no change; awaiting prune / daily-loss-cap authorization.
