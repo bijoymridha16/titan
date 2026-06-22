@@ -216,3 +216,24 @@ def test_trigger_kill_sets_state():
     assert eng.state.kill_switch
     assert eng.state.halted_today
     assert "KILL" in eng.state.halt_reason
+
+
+def test_daily_halt_resets_next_sim_day():
+    # Regression: a daily halt (here: consecutive-loss streak) must self-recover
+    # at the next trading day, not latch forever (operator finding 2026-06-22 —
+    # the streak halt stayed latched across ~13 sim-days, freezing trading).
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    clk = {"t": datetime(2026, 6, 22, 10, 0, tzinfo=IST)}
+    eng = RiskEngine(make_limits(max_consecutive_losses=3), make_state(),
+                     now_fn=lambda: clk["t"])
+    for _ in range(3):
+        eng.state.on_trade_closed(-100.0)
+    blocked = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert not blocked.approved and "consecutive" in blocked.reason
+    # next sim-day → daily counters + halt reset → trades again
+    clk["t"] = datetime(2026, 6, 23, 10, 0, tzinfo=IST)
+    resumed = eng.check(order(), per_unit_risk=2.0, available_cash=500_000)
+    assert resumed.approved
+    assert eng.state.consecutive_losses == 0 and not eng.state.halted_today

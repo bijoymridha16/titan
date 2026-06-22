@@ -88,6 +88,8 @@ class RiskEngine:
         # callable so a live toggle (Redis/API) is reflected without rebuilding
         # the engine. Accepts a bool too, for convenience in tests.
         self._sim_mode_fn = sim_mode_fn if callable(sim_mode_fn) else (lambda: bool(sim_mode_fn))
+        self._day = None    # trading date currently in effect
+        self._week = None   # (iso-year, iso-week) currently in effect
 
     @property
     def sim_mode(self) -> bool:
@@ -95,7 +97,28 @@ class RiskEngine:
 
     # ---------- public ----------
 
+    def _maybe_roll(self, now) -> None:
+        """Reset DAILY state at the start of each new trading day so a daily halt
+        (loss cap, profit lock, consecutive-loss streak) self-recovers next
+        session instead of latching forever. Multi-day risk (drawdown, weekly
+        loss) persists; weekly resets on an iso-week change."""
+        d = now.date()
+        wk = now.isocalendar()[:2]
+        if self._day is None:
+            self._day, self._week = d, wk
+            return
+        if d != self._day:
+            self._day = d
+            self.state.realized_pnl_today = 0.0
+            self.state.consecutive_losses = 0
+            self.state.halted_today = False
+            self.state.halt_reason = None
+        if wk != self._week:
+            self._week = wk
+            self.state.realized_pnl_week = 0.0
+
     def check(self, order: Order, per_unit_risk: float, available_cash: float) -> RiskDecision:
+        self._maybe_roll(self._now())
         # (gate, sticky): sticky gates halt the rest of the trading day on a breach.
         # Transient gates (market-hours, concurrent-positions) must NOT permanently
         # halt the day — the market reopens / sim can be toggled, and a concurrent
@@ -138,10 +161,11 @@ class RiskEngine:
                 metadata={"requested_qty": order.qty, "per_unit_risk": per_unit_risk},
             )
 
-        # funds
+        # funds — intraday MIS lets notional exceed cash up to the leverage cap,
+        # so index longs aren't systematically funds-rejected on a small account.
         if order.side == OrderSide.BUY and order.price:
             need = order.price * order.qty
-            if need > available_cash * 1.0:  # MIS leverage handled elsewhere
+            if need > available_cash * self.limits.leverage:
                 return RiskDecision(False, "insufficient funds")
 
         return RiskDecision(True)

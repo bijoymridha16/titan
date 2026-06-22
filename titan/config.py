@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     max_consecutive_losses: int = 5
     max_concurrent_positions: int = 3
     intraday_square_off: time = time(15, 15)
+    mis_leverage: float = 5.0            # intraday MIS leverage for the funds gate (notional <= cash * this)
 
     db_url: str = "postgresql+psycopg://titan:titan@localhost:5432/titan"
     redis_url: str = "redis://localhost:6379/0"

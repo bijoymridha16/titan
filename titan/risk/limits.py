@@ -18,6 +18,7 @@ class RiskLimits:
     max_consecutive_losses: int
     max_concurrent_positions: int
     intraday_square_off: time
+    leverage: float = 5.0   # intraday MIS leverage for the funds gate
 
     @classmethod
     def from_settings(cls) -> "RiskLimits":
@@ -31,6 +32,7 @@ class RiskLimits:
             max_consecutive_losses=settings.max_consecutive_losses,
             max_concurrent_positions=settings.max_concurrent_positions,
             intraday_square_off=settings.intraday_square_off,
+            leverage=settings.mis_leverage,
         )
 
     @property
