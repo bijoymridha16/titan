@@ -31,13 +31,10 @@ import numpy as np
 import redis
 
 from titan.config import settings
+from titan.data.universe import anchor as _anchor
 
 log = logging.getLogger(__name__)
 
-ANCHORS = {
-    "NIFTY": 24_500.0, "BANKNIFTY": 52_000.0, "FINNIFTY": 24_000.0,
-    "RELIANCE": 2_950.0, "HDFCBANK": 1_680.0, "ICICIBANK": 1_280.0,
-}
 PER_TICK_VOL = 0.00035  # ~3.5 bps per tick
 SHOCK_PROB = 0.012      # ~1% of ticks get a 20-50 bp jump (one direction)
 
@@ -46,8 +43,10 @@ class SynthFeed:
     def __init__(self, tick_interval_s: float = 0.2,
                  sim_seconds_per_tick: int = 30):
         self.r = redis.from_url(settings.redis_url, decode_responses=True)
-        self.symbols = [s for s in settings.symbols if s in ANCHORS]
-        self.prices = {s: ANCHORS[s] for s in self.symbols}
+        # feed the active (dynamically-selected) universe; anchor prices come
+        # from the candidate pool so any selected symbol gets a realistic start.
+        self.symbols = list(settings.symbols)
+        self.prices = {s: _anchor(s) for s in self.symbols}
         self.tick_interval_s = tick_interval_s
         self.sim_step = timedelta(seconds=sim_seconds_per_tick)
         self.rng = np.random.default_rng()

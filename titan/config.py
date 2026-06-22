@@ -1,10 +1,36 @@
 from __future__ import annotations
 
+import time as _time
 from datetime import time
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Cached read of the dynamically-selected universe from Redis. Kept here (not in
+# data/) so config has no import-time dependency on the data layer. 5s TTL so the
+# hot paths that read settings.symbols don't hammer Redis; any failure → None
+# (caller falls back to the static TITAN_UNIVERSE).
+_UNI_CACHE: dict = {"ts": 0.0, "val": None}
+_UNI_TTL_S = 5.0
+
+
+def _dynamic_universe(redis_url: str) -> list[str] | None:
+    now = _time.monotonic()
+    if now - _UNI_CACHE["ts"] < _UNI_TTL_S:
+        return _UNI_CACHE["val"]
+    val = None
+    try:
+        import redis
+        raw = redis.from_url(redis_url, decode_responses=True).get("titan:universe:selected")
+        if raw:
+            syms = [s.strip() for s in raw.split(",") if s.strip()]
+            val = syms or None
+    except Exception:
+        val = None
+    _UNI_CACHE["ts"] = now
+    _UNI_CACHE["val"] = val
+    return val
 
 
 class Settings(BaseSettings):
@@ -159,6 +185,13 @@ class Settings(BaseSettings):
 
     @property
     def symbols(self) -> list[str]:
+        # Dynamic universe: if a selection has been published to Redis
+        # (titan:universe:selected by titan.data.universe), use it; else fall
+        # back to the static TITAN_UNIVERSE. Best-effort + briefly cached so a
+        # Redis hiccup never breaks symbol resolution.
+        dyn = _dynamic_universe(self.redis_url)
+        if dyn:
+            return dyn
         return [s.strip() for s in self.universe.split(",") if s.strip()]
 
     # ─── auto-pilot (decision-driven strategy selection) ───

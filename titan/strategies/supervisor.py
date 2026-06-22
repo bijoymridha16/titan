@@ -231,7 +231,19 @@ class Supervisor:
         # 1) check SL/TP exits on any open trade for this symbol
         await self._check_exits(symbol, bar)
 
-        # 2) run each enabled strategy that matches this tf
+        # 2) load the bar window ONCE for this (symbol, tf) — it's identical for
+        #    every strategy on this timeframe, so loading per-strategy would mean
+        #    N redundant DB reads per event (crippling with a 50-symbol universe).
+        window = self._load_window(symbol, tf)
+        if window.empty:
+            return
+        regime = await self.r.get("titan:regime:current")
+        last = window.iloc[-1]
+        features = {"o": float(last["o"]), "h": float(last["h"]),
+                    "l": float(last["l"]), "c": float(last["c"]),
+                    "v": float(last["v"]), "window_bars": int(len(window))}
+
+        # 3) run each enabled strategy that matches this tf on the shared window
         for name in enabled:
             cls = STRATEGIES.get(name)
             if not cls or cls.timeframe != tf:
@@ -240,19 +252,11 @@ class Supervisor:
             inst = self.strategies.get(key) or cls(symbol)
             self.strategies[key] = inst
 
-            window = self._load_window(symbol, tf)
-            if window.empty:
-                continue
             try:
                 sigs = inst.on_bar(window)
             except Exception as e:
                 log.exception("%s.on_bar(%s) failed: %s", name, symbol, e)
                 continue
-            regime = await self.r.get("titan:regime:current")
-            last = window.iloc[-1]
-            features = {"o": float(last["o"]), "h": float(last["h"]),
-                        "l": float(last["l"]), "c": float(last["c"]),
-                        "v": float(last["v"]), "window_bars": int(len(window))}
             for sig in sigs:
                 # capture EVERY signal — including the ones we don't act on
                 if sig.kind == SignalKind.EXIT:
