@@ -96,6 +96,15 @@ escalated instead. Pre-stall strategy read: orb +2,200 (58%) only winner;
 orb_confirmed 60% win (confirmation edge); donchian/momentum/vwap_revert deep
 negative. Fix needs a user decision: cut leverage / reinstate caps / re-fund / prune.
 
+### 2026-06-22 — Decision #23: 3+1 fix applied (user-authorized)
+
+Re-funded the paper account to ₹50k (truncated trading tables; backup
+titan_full_20260622_153656.sql.gz) and cut MIS leverage 5×→2×. Kept the operator
+journal, universe_selection, the 50-symbol universe, and the armed/validated
+auto-pilot. Result: session ACTIVE, equity ~₹48.6k, trades flowing, drawdown tiny.
+Losing strategies still run (no pruning chosen) so it may bleed slowly, but ruin
+is far less likely at 2×. Watch next review that it has not re-halted on drawdown.
+
 ### How to review my decisions later
 ```sql
 SELECT ts, category, title, action, rationale, expected
