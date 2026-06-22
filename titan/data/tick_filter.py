@@ -29,13 +29,18 @@ from datetime import datetime
 
 class TickSanitizer:
     def __init__(self, n_sigma: float = 4.0, window_s: int = 300,
-                 min_samples: int = 20, max_ts_drift_s: float | None = None):
+                 min_samples: int = 20, max_ts_drift_s: float | None = None,
+                 session_gap_s: float = 3600.0):
         self.n_sigma = n_sigma
         self.window_s = window_s
         self.min_samples = min_samples
         # how far a tick's timestamp may drift from the latest seen before it's
         # treated as a timestamp anomaly. Defaults to the window length.
         self.max_ts_drift_s = window_s if max_ts_drift_s is None else max_ts_drift_s
+        # a FORWARD jump larger than this is a legitimate new session (overnight /
+        # weekend / replay wrap), not a corrupt tick — the window is reset rather
+        # than the tick rejected. Must be > max_ts_drift_s.
+        self.session_gap_s = session_gap_s
         self._buf: deque[tuple[float, float, float]] = deque()  # (epoch, price, volume)
         self._last_ts: float | None = None   # latest accepted tick epoch
 
@@ -62,10 +67,18 @@ class TickSanitizer:
         """
         epoch = ts.timestamp()
 
-        # timestamp anomaly: a tick dated too far from the latest seen is
-        # rejected before it can prune the window and warm-up-accept a bad price.
-        if self._last_ts is not None and abs(epoch - self._last_ts) > self.max_ts_drift_s:
-            return False
+        if self._last_ts is not None:
+            drift = epoch - self._last_ts
+            if drift > self.session_gap_s:
+                # legitimate new session (overnight / weekend / replay wrap):
+                # a large FORWARD jump — reset the window and start fresh rather
+                # than reject. Otherwise every post-wrap tick looks anomalous.
+                self._buf.clear()
+            elif drift > self.max_ts_drift_s or drift < -self.max_ts_drift_s:
+                # suspicious single far-future tick, or a stale/replayed past
+                # tick — reject before it can prune the window and warm-up-accept
+                # a corrupt price.
+                return False
 
         self._prune(epoch)
 

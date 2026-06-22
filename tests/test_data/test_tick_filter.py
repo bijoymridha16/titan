@@ -71,6 +71,20 @@ def test_rejects_far_past_timestamp_replay():
     assert san.accept(_ts(100 + 29 - 600), 100.0) is False
 
 
+def test_session_wrap_resets_not_rejected():
+    # regression: the synth feed wraps 15:30 -> next-day 09:15 (an ~18h forward
+    # jump). That must reset the window and keep flowing, NOT freeze the feed
+    # (live finding 2026-06-22 — over-aggressive drift guard stalled bars at day 1).
+    san = TickSanitizer(n_sigma=4.0, window_s=300, min_samples=5,
+                        max_ts_drift_s=300, session_gap_s=3600)
+    for i in range(10):
+        assert san.accept(_ts(i * 30), 24500.0 + i) is True
+    # next session, ~18h later, normal price → accepted (window reset)
+    assert san.accept(_ts(10 * 30 + 18 * 3600), 24500.0) is True
+    # and it keeps flowing within the new session
+    assert san.accept(_ts(10 * 30 + 18 * 3600 + 30), 24505.0) is True
+
+
 def test_legit_forward_progress_within_drift_ok():
     san = TickSanitizer(n_sigma=4.0, window_s=300, min_samples=5)
     # ticks 60s apart (within 300s drift) advance fine

@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     tick_filter_window_s: int = 300      # trailing window for VWAP / std (5 min)
     tick_filter_min_samples: int = 20    # accept-all until the window has this many
     tick_max_ts_drift_s: int = 300       # reject ticks whose ts drifts this far from latest seen
+    tick_session_gap_s: int = 3600       # FORWARD jump beyond this = new session (reset, don't reject)
 
     # ─── order idempotency (manifesto Scenario A) ───
     # TTL of the per-(strategy,symbol) dispatch lock. Held during send; kept for

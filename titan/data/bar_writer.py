@@ -87,7 +87,8 @@ def run():
                             n_sigma=settings.tick_outlier_sigma,
                             window_s=settings.tick_filter_window_s,
                             min_samples=settings.tick_filter_min_samples,
-                            max_ts_drift_s=settings.tick_max_ts_drift_s)
+                            max_ts_drift_s=settings.tick_max_ts_drift_s,
+                            session_gap_s=settings.tick_session_gap_s)
                     if not san.accept(ts, price, vol):
                         log.warning("tick outlier dropped: %s price=%.2f", symbol, price)
                         try:
