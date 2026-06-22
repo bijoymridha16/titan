@@ -56,6 +56,46 @@ summarised here as I make them:
 **State after session 1:** session ACTIVE, 3 strategies live, longs now filling,
 trades flowing across regimes. All decisions queryable in `operator_decisions`.
 
+### 2026-06-22 — Review #1 (decision #12): no change
+
+Health 6/6, sim at Jul 26 (~32 sim-days, 81 trades, −10,056 realized), session
+ACTIVE, auto-pilot governing correctly. **Held all params steady** (mandate: don't
+chase synthetic noise / keep data comparable). Reads: vwap_revert now RANGE-confined
+and mildly +ve there (+668); supertrend_adx worst at 0/8 win (too small to act);
+orb better in TRANSITION than TREND; the streak-limit raise stopped the daily
+halting. Watching supertrend_adx until it has ≥20 trades.
+
+### 2026-06-22 — Review #2 (decision #16): no change
+
+Health 6/6, sim ~Aug 7, session ACTIVE, 12 strategies live (10 have traded).
+**Held steady.** Headline: vwap_revert in RANGE now strongly +ve (+5483, 25 trades)
+— regime-gating validated. supertrend_adx is 0/20 win (−7143), structurally
+expected for trend-following on a random walk — flagged, NOT cut (cutting on
+synthetic P&L breaks discipline + comparability). New variants still thin
+(orb_confirmed 5, vwap_rsi 2, bb_squeeze 0) — need more trades for an A/B verdict.
+
+### 2026-06-22 — Review #3 (decision #18): no change, 50-symbol universe
+
+Health 6/6, dynamic 50-symbol universe live, 48 equities traded, 572 closed
+trades. Account healthy: realized −7,876 (~₹42k equity) — the 423 reading was a
+stale sim-ts-ordered equity_curve row, not ruin. **Held params.** Strong read:
+trailing-stop trend-following (supertrend_adx +48.6k) catches synthetic shock-legs
+while fixed-stop crossovers bleed (momentum 0/74, ma_cross 0/52). orb_confirmed
+(58% win) and vwap_rsi (50%, +1.3k) edge their baselines — early but promising.
+Follow-up noted: latest_equity() orders by sim-ts and can show a stale row — a
+display fix for later (realized total is the source of truth).
+
+### 2026-06-22 — Review #4 (decision #22): run STUCK halted — escalating to user
+
+Health 6/6, but the run is HALTED on max-drawdown: realized −45,906 (~₹4k equity),
+0 open, **no trades flowing**. A supervisor restart does NOT clear it (peak_equity
+rebuilt from equity_curve → drawdown stays breached → re-halts instantly). The 5×
+leverage × 50 symbols × 100% caps drained the account to ruin and the experiment
+has stalled. **Did not override** the user's explicit loose-caps/leverage choice —
+escalated instead. Pre-stall strategy read: orb +2,200 (58%) only winner;
+orb_confirmed 60% win (confirmation edge); donchian/momentum/vwap_revert deep
+negative. Fix needs a user decision: cut leverage / reinstate caps / re-fund / prune.
+
 ### How to review my decisions later
 ```sql
 SELECT ts, category, title, action, rationale, expected
