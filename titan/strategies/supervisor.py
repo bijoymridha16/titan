@@ -293,19 +293,43 @@ class Supervisor:
 
         await self._publish_session_state()
 
+    def _record_risk_event(self, kind: str, detail: dict) -> None:
+        """Persist a risk event (halt / kill / profit-lock) to risk_events so the
+        dashboard's 'Recent risk events' panel is populated. Best-effort."""
+        try:
+            with engine().begin() as cx:
+                cx.execute(text(
+                    "INSERT INTO risk_events (ts, kind, detail) "
+                    "VALUES (now(), :k, CAST(:d AS JSONB))"),
+                    {"k": kind, "d": json.dumps(detail)})
+        except Exception as e:
+            log.warning("risk_event persist failed: %s", e)
+
     async def _publish_session_state(self) -> None:
         """Surface risk-engine session state to Redis so the dashboard can show
-        the true halt status (loss-halt vs profit-lock vs active)."""
+        the true halt status (loss-halt vs profit-lock vs active), and record the
+        START of each halt episode to risk_events."""
         try:
             await self.r.set("titan:session:realized_pnl",
                              f"{self.state.realized_pnl_today:.2f}")
             if self.state.halted_today:
+                reason = self.state.halt_reason or "halted"
                 await self.r.set("titan:session:status", "HALTED")
-                await self.r.set("titan:session:reason",
-                                 self.state.halt_reason or "halted")
+                await self.r.set("titan:session:reason", reason)
+                # record once per halt episode (reason changes on a new halt)
+                if getattr(self, "_last_halt_recorded", None) != reason:
+                    self._last_halt_recorded = reason
+                    kind = "PROFIT_LOCK" if "profit" in reason.lower() else "SESSION_HALT"
+                    self._record_risk_event(kind, {
+                        "reason": reason,
+                        "realized_pnl_today": round(self.state.realized_pnl_today, 2),
+                        "consecutive_losses": self.state.consecutive_losses,
+                        "equity": round(self.state.current_equity, 2),
+                    })
             else:
                 await self.r.set("titan:session:status", "ACTIVE")
                 await self.r.set("titan:session:reason", "")
+                self._last_halt_recorded = None   # reset so the next halt records
         except Exception:
             pass
 

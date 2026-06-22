@@ -22,8 +22,26 @@ from streamlit_autorefresh import st_autorefresh
 
 from titan import clock
 from titan.config import settings
+from titan.decision.selector import REGIME_CANDIDATES
+from titan.strategies.registry import BASE_STRATEGIES, KILLED_STRATEGIES
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# human descriptions for every registered strategy (falls back to the name)
+STRAT_DESC = {
+    "orb": "Opening Range Breakout — first breakout of the 09:15–09:30 range.",
+    "orb_confirmed": "ORB + confirmation — breakout needs volume expansion & EMA-slope agreement.",
+    "vwap_revert": "VWAP Mean Reversion — fades >2σ deviations from session VWAP.",
+    "vwap_rsi": "VWAP-revert + RSI gate — wider 2.5×ATR stop, fades only when RSI is exhausted.",
+    "supertrend_adx": "Supertrend + ADX — trend-follows Supertrend flips when ADX>20.",
+    "ma_cross": "MA Crossover — EMA(9/21) crossover with ATR stop.",
+    "donchian": "Donchian Breakout — breaks the prior N-bar channel.",
+    "momentum": "Momentum ROC — enters when rate-of-change flips sign.",
+    "rsi_revert": "RSI Reversion — fades RSI crosses of oversold/overbought.",
+    "bollinger_revert": "Bollinger Reversion — fades band touches back to the mid.",
+    "bb_squeeze": "Bollinger Squeeze — breakout from a low-volatility compression.",
+    "tsmom": "Time-Series Momentum (KILLED) — walk-forward FAILED; disabled by guard.",
+}
 API_BASE = os.getenv("TITAN_API_BASE", "http://localhost:8000")
 
 st.set_page_config(
@@ -370,8 +388,8 @@ st.markdown(
     '</div>'
     f'<div style="display:flex;gap:18px;align-items:center;">'
     f'<span class="muted"><span class="dot {"dot-on" if feed_alive else "dot-off"}"></span>feed</span>'
-    f'<span class="market-clock">{now_ist.strftime("%a %d %b · %H:%M:%S")} IST</span>'
-    + (f'<span class="pill bg-warn">sim {clock.sim_session_now(now_ist).strftime("%H:%M")}</span>'
+    f'<span class="market-clock">{now_ist.strftime("%a %d %b · %I:%M:%S %p")} IST</span>'
+    + (f'<span class="pill bg-warn">sim {clock.sim_session_now(now_ist).strftime("%I:%M %p")}</span>'
        if sim_on else "")
     + '</div></div>',
     unsafe_allow_html=True,
@@ -668,10 +686,19 @@ with tab_chart:
         st.plotly_chart(fv, use_container_width=True)
 
 
+# P&L colouring for tables (green profit / red loss / muted flat)
+def _pnl_color(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "color:#8a93a6;"
+    return f"color:{'#16c784' if v > 0 else ('#ea3943' if v < 0 else '#8a93a6')};font-weight:600;"
+
+
 # ─── tab: positions ───
 with tab_pos:
-    df = q("""SELECT strategy, symbol, side, qty, entry_price AS entry,
-                     stop_loss AS sl, target,
+    df = q("""SELECT strategy, symbol, side, qty, entry_price,
+                     stop_loss, target,
                      (entry_ts AT TIME ZONE 'Asia/Kolkata') AS entry_ts
               FROM trades WHERE exit_ts IS NULL ORDER BY entry_ts DESC""")
     if df.empty:
@@ -679,7 +706,49 @@ with tab_pos:
                     '<span class="muted">No open positions</span></div>',
                     unsafe_allow_html=True)
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # live mark-to-market from the latest LTP in Redis
+        ltps = {}
+        for sym in df["symbol"].unique():
+            v = r.get(f"titan:ltp:{sym}")
+            ltps[sym] = float(v) if v else None
+
+        def _mtm(row):
+            ltp = ltps.get(row["symbol"])
+            entry = float(row["entry_price"]); qty = int(row["qty"])
+            if ltp is None:
+                return pd.Series({"LTP": None, "P&L (₹)": None, "Return %": None})
+            sign = 1 if row["side"] == "BUY" else -1
+            pnl = (ltp - entry) * sign * qty
+            ret = (pnl / (entry * qty) * 100) if entry and qty else 0.0
+            return pd.Series({"LTP": ltp, "P&L (₹)": pnl, "Return %": ret})
+
+        mtm = df.apply(_mtm, axis=1)
+        df = pd.concat([df, mtm], axis=1)
+        df["Direction"] = df["side"].map(lambda s: "🟢 LONG" if s == "BUY" else "🔴 SHORT")
+
+        tot = float(df["P&L (₹)"].dropna().sum())
+        winners = int((df["P&L (₹)"] > 0).sum()); losers = int((df["P&L (₹)"] < 0).sum())
+        m = st.columns(4)
+        m[0].metric("Open positions", len(df))
+        m[1].metric("Winning / Losing", f"{winners} / {losers}")
+        m[2].metric("Unrealized P&L", f"₹{tot:+,.0f}",
+                    delta_color="normal" if tot >= 0 else "inverse")
+        m[3].metric("Mark", "live LTP")
+
+        disp = df[["strategy", "symbol", "Direction", "qty", "entry_price", "LTP",
+                   "stop_loss", "target", "P&L (₹)", "Return %", "entry_ts"]].rename(
+            columns={"strategy": "Strategy", "symbol": "Symbol", "qty": "Qty",
+                     "entry_price": "Entry", "stop_loss": "Stop", "target": "Target",
+                     "entry_ts": "Entered (IST)"})
+        sty = (disp.style
+               .map(_pnl_color, subset=["P&L (₹)", "Return %"])
+               .format({"Entry": "₹{:,.2f}", "LTP": "₹{:,.2f}", "Stop": "₹{:,.2f}",
+                        "Target": "₹{:,.2f}", "P&L (₹)": "₹{:+,.0f}", "Return %": "{:+.2f}%",
+                        "Entered (IST)": lambda t: t.strftime("%m-%d %I:%M %p") if pd.notna(t) else "—"},
+                       na_rep="—"))
+        st.dataframe(sty, use_container_width=True, hide_index=True)
+        st.caption("P&L is live mark-to-market vs the latest traded price. "
+                   "🟢 LONG profits when price rises; 🔴 SHORT profits when price falls.")
 
 
 # ─── tab: journal ───
@@ -687,7 +756,8 @@ with tab_journal:
     df = q("""SELECT (entry_ts AT TIME ZONE 'Asia/Kolkata') AS entry_ts,
                      (exit_ts  AT TIME ZONE 'Asia/Kolkata') AS exit_ts,
                      strategy, symbol, side, qty,
-                     entry_price, exit_price, pnl, exit_reason
+                     entry_price, exit_price, pnl, exit_reason,
+                     EXTRACT(EPOCH FROM (exit_ts - entry_ts))/60.0 AS held_min
               FROM trades WHERE exit_ts IS NOT NULL
               ORDER BY exit_ts DESC LIMIT 100""")
     if df.empty:
@@ -697,48 +767,80 @@ with tab_journal:
     else:
         wins = int((df["pnl"] > 0).sum()); losses = int((df["pnl"] <= 0).sum())
         net = float(df["pnl"].sum())
-        c = st.columns(4)
+        gross_w = float(df.loc[df["pnl"] > 0, "pnl"].sum())
+        gross_l = float(-df.loc[df["pnl"] <= 0, "pnl"].sum())
+        pf = (gross_w / gross_l) if gross_l else float("inf")
+        c = st.columns(5)
         c[0].metric("Trades", len(df))
         c[1].metric("Wins / Losses", f"{wins} / {losses}")
         c[2].metric("Win rate", f"{wins / max(len(df),1) * 100:.1f}%")
-        c[3].metric("Net P&L", f"₹{net:+,.0f}",
+        c[3].metric("Profit factor", f"{pf:.2f}" if pf != float("inf") else "∞")
+        c[4].metric("Net P&L", f"₹{net:+,.0f}",
                     delta_color="normal" if net >= 0 else "inverse")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        df["Result"] = df["pnl"].map(lambda v: "✅ WIN" if v > 0 else "❌ LOSS")
+        df["Direction"] = df["side"].map(lambda s: "LONG" if s in ("BUY", "LONG") else "SHORT")
+        df["Return %"] = df.apply(
+            lambda x: (float(x["pnl"]) / (float(x["entry_price"]) * int(x["qty"])) * 100)
+            if x["entry_price"] and x["qty"] else 0.0, axis=1)
+
+        disp = df[["exit_ts", "strategy", "symbol", "Direction", "qty", "entry_price",
+                   "exit_price", "pnl", "Return %", "exit_reason", "Result", "held_min"]].rename(
+            columns={"exit_ts": "Closed (IST)", "strategy": "Strategy", "symbol": "Symbol",
+                     "qty": "Qty", "entry_price": "Entry", "exit_price": "Exit",
+                     "pnl": "P&L (₹)", "exit_reason": "Reason", "held_min": "Held (min)"})
+        sty = (disp.style
+               .map(_pnl_color, subset=["P&L (₹)", "Return %"])
+               .format({"Entry": "₹{:,.2f}", "Exit": "₹{:,.2f}", "P&L (₹)": "₹{:+,.0f}",
+                        "Return %": "{:+.2f}%", "Held (min)": "{:.0f}",
+                        "Closed (IST)": lambda t: t.strftime("%m-%d %I:%M %p") if pd.notna(t) else "—"},
+                       na_rep="—"))
+        st.dataframe(sty, use_container_width=True, hide_index=True)
+        st.caption("Each row is a CLOSED trade. P&L = realized profit/loss after the exit. "
+                   "Exit reason: `target` (hit profit), `stop` (hit stop-loss), `signal_exit` (strategy flip).")
 
 
 # ─── tab: strategies ───
 with tab_strat:
-    all_strats = [
-        ("orb", "Opening Range Breakout",
-         "Trades the first breakout above / below the 09:15–09:30 range.",
-         False),
-        ("vwap_revert", "VWAP Mean Reversion",
-         "Fades >2σ deviations from session VWAP back to the mean.",
-         False),
-        ("supertrend_adx", "Supertrend + ADX",
-         "Trend-follows Supertrend flips when ADX > 20 (filters chop).",
-         False),
-        ("tsmom", "Time-Series Momentum (KILLED)",
-         "20-day sign · vol-targeted daily rebalance. Walk-forward FAILED on "
-         "3-equity universe — Sharpe -1.42 OOS. See docs/research/01_tsmom_results.md. "
-         "Disabled by guard; needs NSE-50 universe to be viable.",
-         True),
-    ]
     on = set(r.smembers("titan:strategies:enabled") or [])
+    # regimes that arm each strategy (from the decision engine's map)
+    regime_for = {n: [reg for reg, names in REGIME_CANDIDATES.items() if n in names]
+                  for n in BASE_STRATEGIES}
+    # render order: currently-active first, then the rest, killed last
+    names = sorted(BASE_STRATEGIES.keys(),
+                   key=lambda n: (n in KILLED_STRATEGIES, n not in on, n))
+    all_strats = [(n, n.replace("_", " ").upper(),
+                   STRAT_DESC.get(n, n), n in KILLED_STRATEGIES) for n in names]
 
     # ── auto-pilot control bar ──
     _ap_flag = r.get("titan:autopilot:enabled")
     autopilot_armed = (_ap_flag == "1")
     _regime_now = r.get("titan:regime:current") or "—"
     _regime_reason = r.get("titan:regime:reason") or ""
+    active_now = sorted(n for n in on if n in BASE_STRATEGIES)
     ap_c = st.columns([3, 1, 1])
-    ap_c[0].markdown(
-        f'<div class="card" style="border-color:{"#16c784" if autopilot_armed else "#1f2740"};">'
-        f'<span style="font-weight:700;">{"🤖 AUTO-PILOT ARMED" if autopilot_armed else "👁 AUTO-PILOT OBSERVE-ONLY"}</span> '
-        f'<span class="muted">· regime <b>{_regime_now}</b> · '
-        f'{"strategies are selected automatically by market regime — toggles are read-only" if autopilot_armed else "classifying only; manual toggles active"}</span>'
-        f'<div class="muted" style="margin-top:4px;font-size:0.72rem;">{_regime_reason}</div></div>',
-        unsafe_allow_html=True)
+    if autopilot_armed:
+        active_html = ("".join(
+            f'<span style="background:#16c78422;color:#16c784;border:1px solid #16c784;'
+            f'border-radius:10px;padding:1px 8px;margin-right:6px;font-weight:600;">{n}</span>'
+            for n in active_now) or '<span class="muted">none armed in this regime</span>')
+        ap_c[0].markdown(
+            f'<div class="card" style="border-color:#16c784;">'
+            f'<span style="font-weight:700;">🤖 AUTO-PILOT ARMED</span> '
+            f'<span class="muted">· regime <b>{_regime_now}</b> · auto-selecting by regime '
+            f'(manual toggles read-only)</span>'
+            f'<div style="margin-top:6px;"><span class="muted" style="font-size:0.72rem;">'
+            f'ACTIVE NOW &nbsp;</span>{active_html}</div>'
+            f'<div class="muted" style="margin-top:4px;font-size:0.72rem;">{_regime_reason}</div></div>',
+            unsafe_allow_html=True)
+    else:
+        ap_c[0].markdown(
+            f'<div class="card" style="border-color:#1f2740;">'
+            f'<span style="font-weight:700;">👁 AUTO-PILOT OBSERVE-ONLY</span> '
+            f'<span class="muted">· regime <b>{_regime_now}</b> · classifying only; '
+            f'manual toggles active</span>'
+            f'<div class="muted" style="margin-top:4px;font-size:0.72rem;">{_regime_reason}</div></div>',
+            unsafe_allow_html=True)
     if autopilot_armed:
         if ap_c[1].button("Disarm auto-pilot", use_container_width=True):
             api("POST", "/autopilot/disarm"); st.rerun()
@@ -760,14 +862,27 @@ with tab_strat:
                 age = f"{secs:.0f}s ago"; stale = secs > 120
             except Exception: pass
         dot_cls = "dot-on" if (enabled and not stale) else ("dot-warn" if enabled else "dot-off")
-        state_txt = "ENABLED" if enabled else "DISABLED"
-        state_cls = "up" if enabled and not stale else ("bg-warn" if enabled else "muted")
+        # State wording differs under auto-pilot (it OWNS selection) vs manual.
+        if killed:
+            state_txt, state_cls = "KILLED", "dn"
+        elif autopilot_armed:
+            state_txt, state_cls = ("🟢 ACTIVE", "up") if enabled else ("IDLE", "muted")
+        else:
+            state_txt, state_cls = ("ENABLED", "up") if enabled else ("DISABLED", "muted")
+        regs = regime_for.get(name, [])
+        regimes_txt = ", ".join(str(rg).split(".")[-1] for rg in regs) or "—"
+        # highlight whole card green when active under auto-pilot
+        border = "#16c784" if (enabled and autopilot_armed) else "#1f2740"
         st.markdown(f"""
         <div class="card" style="margin-bottom:10px;display:flex;
-                                  align-items:center;gap:18px;">
+                                  align-items:center;gap:18px;border-color:{border};">
           <div style="flex:2;">
             <div style="font-weight:700;font-size:1.0rem;">{label}</div>
             <div class="muted" style="margin-top:2px;">{name} · {descr}</div>
+          </div>
+          <div style="flex:0.7;text-align:center;">
+            <div class="muted" style="font-size:0.7rem;">ARMED IN</div>
+            <div style="font-weight:600;font-size:0.8rem;">{regimes_txt}</div>
           </div>
           <div style="flex:0.6;text-align:center;">
             <div class="muted" style="font-size:0.7rem;">HEARTBEAT</div>
@@ -877,7 +992,7 @@ with tab_analytics:
 
         # 3) recent rejected signals — "what we skipped, and why"
         st.markdown("##### Recent rejected signals (what we skipped & why)")
-        rj = q("""SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata','MM-DD HH24:MI') ts, strategy, symbol, kind,
+        rj = q("""SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata','MM-DD HH12:MI AM') ts, strategy, symbol, kind,
                          regime,
                          LEFT(split_part(reject_reason,'session halted: ',-1),60) reject_reason
                   FROM signals WHERE accepted=false ORDER BY ts DESC LIMIT 25""")
@@ -935,7 +1050,7 @@ with tab_news:
         # use a manual table because Streamlit's dataframe doesn't render HTML
         rows_html = []
         for _, nr in news_df.head(100).iterrows():  # not `r` — would shadow redis client
-            ts = nr["published_at"].strftime("%d %b %H:%M") if nr["published_at"] else "—"
+            ts = nr["published_at"].strftime("%d %b %I:%M %p") if nr["published_at"] else "—"
             rows_html.append(f"""
             <tr>
               <td class="muted" style="white-space:nowrap;">{ts}</td>
@@ -1014,11 +1129,25 @@ with tab_risk:
             api("POST", "/flatten")
 
     st.markdown("##### Recent risk events")
-    df = q("SELECT (ts AT TIME ZONE 'Asia/Kolkata') AS ts, kind, detail FROM risk_events ORDER BY ts DESC LIMIT 10")
+    df = q("SELECT (ts AT TIME ZONE 'Asia/Kolkata') AS ts, kind, detail "
+           "FROM risk_events ORDER BY ts DESC LIMIT 15")
     if df.empty:
-        st.markdown('<span class="muted">No events</span>', unsafe_allow_html=True)
+        st.markdown('<span class="muted">No risk events yet — halts, profit-locks and '
+                    'kills will appear here once they fire.</span>', unsafe_allow_html=True)
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        def _detail(d):
+            if not isinstance(d, dict):
+                return str(d or "")
+            bits = []
+            if d.get("reason"): bits.append(str(d["reason"]))
+            if d.get("realized_pnl_today") is not None:
+                bits.append(f"day P&L ₹{d['realized_pnl_today']:+,.0f}")
+            if d.get("consecutive_losses"): bits.append(f"streak {d['consecutive_losses']}")
+            return " · ".join(bits)
+        df["When (IST)"] = df["ts"].dt.strftime("%m-%d %I:%M %p")
+        df["Detail"] = df["detail"].map(_detail)
+        st.dataframe(df[["When (IST)", "kind", "Detail"]].rename(columns={"kind": "Event"}),
+                     use_container_width=True, hide_index=True)
 
 
 # ─── tab: system ───
