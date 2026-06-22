@@ -428,7 +428,21 @@ def latest_equity() -> float:
     return float(df["equity"].iloc[0]) if not df.empty else settings.capital
 
 def today_pnl() -> float:
-    df = q("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades WHERE entry_ts::date = CURRENT_DATE")
+    # Authoritative sim-day realized P&L, maintained by the supervisor's risk
+    # state and reset at each new sim trading day (IST). The old
+    # `entry_ts::date = CURRENT_DATE` query broke under the sim clock — sim dates
+    # run ahead of the server's real (UTC) date, so almost nothing matched and
+    # Today P&L / daily-profit / daily-loss were stuck at 0.
+    v = r.get("titan:session:realized_pnl")
+    if v is not None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+    # fallback: realized P&L for the current IST day from closed trades
+    df = q("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades "
+           "WHERE (exit_ts AT TIME ZONE 'Asia/Kolkata')::date "
+           "= (now() AT TIME ZONE 'Asia/Kolkata')::date")
     return float(df["pnl"].iloc[0]) if not df.empty else 0.0
 
 def open_count() -> int:
