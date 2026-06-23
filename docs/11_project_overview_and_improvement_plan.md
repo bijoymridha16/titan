@@ -3,10 +3,28 @@
 > Technical reference for the whole system: scope, goals, architecture, full
 > flow charts, a subsystem-by-subsystem spec (exact thresholds, formulas, Redis
 > keys, DB schema, API surface), current status, and the improvement backlog.
-> Written 2026-06-20; numbers cross-checked against source on that date — if code
-> and doc disagree, code wins, fix the doc. Companions: `docs/03` (architecture),
+> Written 2026-06-20; **last synced to source 2026-06-23** — if code and doc
+> disagree, code wins, fix the doc. Companions: `docs/03` (architecture),
 > `docs/06` (risk), `docs/08` (automation), `docs/09` (roadmap analysis),
-> `docs/10` (changes & decisions), `AUTOPSY_FINDINGS.md`.
+> `docs/10` (changes & decisions), `docs/12` (strategy guide), `docs/13`/`docs/14`
+> (external-analysis triage + research), `docs/operator_journal.md`,
+> `docs/analysis/`, `AUTOPSY_FINDINGS.md`.
+
+> **What changed since 2026-06-20 (high level):** strategy library activated into
+> the live rotation — **17 strategies** now (was 4 named); new confirmation
+> families (orb_confirmed, vwap_rsi, macd_cross, stoch_adx, rsi_divergence,
+> supertrend_multi, inside_bar, bb_squeeze) + ATR targets added to the formerly
+> target-less trend strategies. **Dynamic top-N universe** by liquidity replaces
+> the static list. **Resilience/Track-B work landed** (merged from main):
+> distributed order locks, 10-OPS rate limiter, options-routing layer + pre-trade
+> margin check, and a live FinBERT negative-sentiment CRISIS override. **Risk**
+> gained daily self-recovery (counters reset each trading day) and an intraday MIS
+> leverage funds gate. **Tick sanitizer** (Nσ outlier + timestamp guards) protects
+> the bar stream. **Dashboard** reworked (per-strategy performance, live-P&L
+> Positions/Journal, working risk-events, 12h time). An **autonomous operator
+> layer** (`operator_decisions` table + `scripts/operator_log.py` +
+> `docs/operator_journal.md`) records every operator decision. Tests: **203 pass**.
+> Migrations now **011**.
 
 ---
 
@@ -19,9 +37,10 @@ Current state: **paper-mode rehearsal** (no live capital). Core invariant:
 backtest, paper, and live share the same `Strategy` interface and the same
 `RiskEngine` — paper-validated behaviour is what runs live.
 
-Runtime topology: 5 long-lived processes (feed/feed_supervisor, bar_writer,
-supervisor, FastAPI `:8000`, Streamlit `:8501`) + optional auto_pilot process;
-state plane is Redis (control/keys/streams) + TimescaleDB/Postgres (durable).
+Runtime topology: 6 long-lived processes — feed/feed_supervisor (or `synth_feed`
+in sim), bar_writer, supervisor, auto_pilot, FastAPI (`:8000` default; `:8010` in
+the current paper setup), Streamlit `:8501`; state plane is Redis
+(control/keys/streams) + TimescaleDB/Postgres (durable).
 
 ---
 
@@ -31,11 +50,16 @@ Maps to the five requirements in `docs/09`.
 
 | # | Goal | Scope | Status |
 |---|------|-------|--------|
-| **G1** | Trade NIFTY & SENSEX at ₹5K | Indices not directly tradable at ₹5K; resolve instrument (ETF now / weekly options later) + routing layer. | ⚠️ ETF mapping done; options routing not built |
-| **G2** | Real-time UI with trade overlays | TradingView-grade terminal: candles + trade markers + live push. | ⚠️ Streamlit working; React rebuild scaffold only |
-| **G3** | 50+ strategies vetted → promote winners | Variant library + mass walk-forward + multiple-testing correction + leaderboard → validated allowlist. | ✅ Engine built (59 variants); needs real-data runs |
-| **G4** | Real feed, paper fills | Real Angel One WS during session → PaperBroker; retire synth from live path. | ✅ Feed + supervisor built; live streaming unverified until market open |
-| **G5** | Capture everything for pre-live analytics | Persist every signal/decision/order/fill incl. rejected + feature vectors. | ✅ Capture + schema built |
+| **G1** | Trade NIFTY & SENSEX at ₹5K | Indices not directly tradable at ₹5K; ETF map + weekly-options routing. | ✅ ETF map + **options-routing layer + pre-trade margin check built** (§5.18); live-untested |
+| **G2** | Real-time UI with trade overlays | TradingView-grade terminal: candles + trade markers + live push. | ⚠️ Streamlit working & reworked (§5.13); React rebuild still scaffold |
+| **G3** | 50+ strategies vetted → promote winners | Variant library + mass walk-forward + multiple-testing correction + leaderboard → validated allowlist. | ✅ Engine built (59 variants) + **17 live strategies**; needs real-data runs |
+| **G4** | Real feed, paper fills | Real Angel One WS during session → PaperBroker; retire synth from live path. | ✅ Feed + supervisor + tick-sanitizer built; live streaming unverified until market open |
+| **G5** | Capture everything for pre-live analytics | Persist every signal/decision/order/fill incl. rejected + feature vectors. | ✅ Capture + schema + **operator-decision journal** built |
+
+**Operating note (paper/sim):** the autonomous-operator runs have used a 50-symbol
+dynamic universe, 2× MIS leverage, ₹50K capital, all 17 strategies under an armed
+auto-pilot. API runs on **:8010** in that setup (`:8000` is taken by another local
+service). Still synthetic data — verdicts await real-data walk-forward.
 
 **Exit criterion (paper → live):** a strategy that clears the walk-forward gate
 (§5.9) on real backfilled history, accrues real-data paper evidence (§5.10),
@@ -50,10 +74,12 @@ shadow for ≥1 week, with kill switch reachable.
 |-----------|--------|--------------|
 | **Data feed** | `titan/data/feed.py`, `feed_supervisor.py`, `synth_feed.py` | Brings in live ticks (real Angel One WS, or a labelled synthetic feed). Supervisor auto-manages it around market hours. |
 | **Bar writer** | `titan/data/bar_writer.py`, `aggregator.py` | Turns raw ticks into 1m/3m/5m/15m/1d OHLCV candles in TimescaleDB. |
-| **Strategies** | `titan/strategies/` | The trading logic: ORB (validated), 4 named strategies, a 59-variant library, factory, registry, indicators. |
-| **Decision engine** | `titan/decision/` | The "auto-pilot": classifies market regime and auto-selects which *validated* strategies to run. |
-| **Risk engine** | `titan/risk/` | 10 safety gates + per-trade-risk sizing + funds check on every order. |
-| **Execution** | `titan/execution/`, `titan/brokers/` | Routes approved orders to the paper broker (always) or Angel One (shadow/live, 5 more gates). |
+| **Strategies** | `titan/strategies/` | **17 live strategies** (registry) — ORB, VWAP-revert, Supertrend-ADX + the activated library families + new confirmation variants (`variants.py`); a 59-variant factory library; indicators; `pairs.py` (stat-arb scanner). |
+| **Decision engine** | `titan/decision/` | The "auto-pilot": classifies market regime (now incl. a **live FinBERT negative-sentiment CRISIS override**) and auto-selects which *validated* strategies to run. |
+| **Risk engine** | `titan/risk/` | 10 safety gates + per-trade sizing + **MIS-leverage** funds gate; **daily self-recovery**; `allocator.py` (risk-parity weights); `state_store.py` (daily snapshot). |
+| **Execution** | `titan/execution/`, `titan/brokers/` | Router → paper broker (always) or Angel One (shadow/live, 5 gates). Also: `locks.py` (distributed order locks), `rate_limit.py` (10-OPS token bucket), `options.py` (ATM option routing + margin check), `reconciler.py`. |
+| **Universe** | `titan/data/universe.py` | Dynamic top-N selection by liquidity (analyses a 61-name pool → `titan:universe:selected`). |
+| **Operator journal** | `operator_decisions` table, `scripts/operator_log.py`, `docs/operator_journal.md` | Durable record of every autonomous-operator decision (what/why/thinking/expected). |
 | **Backtest** | `titan/backtest/` | Event-driven backtester + walk-forward vetting harness with predeclared thresholds. |
 | **Analytics** | `titan/analytics/` | Records every signal, order attempt, fill, and feature snapshot — the pre-live evidence base. |
 | **Clock** | `titan/clock.py` | Honest market-hours / trading-day logic; gates trading to real session times. |
@@ -153,16 +179,20 @@ shadow for ≥1 week, with kill switch reachable.
         │
         ▼
    REGIME CLASSIFIER (decision/regime.py)  — computes ADX(14), realized-vol %ile, ATR, OR-expansion
+        │  + LIVE FinBERT override: news_neg_p ≥ regime_news_crisis_p ⇒ preemptive CRISIS
         │  applies ladder, most-protective-first:
         ▼
    ┌──────────┬──────────────────────┬──────────────────────┬───────────────┬──────────────┐
    │ CLOSED   │ CRISIS               │ TREND                │ RANGE         │ TRANSITION   │
-   │ outside  │ VIX≥25 OR            │ ADX ≥ 22             │ ADX < 18      │ everything   │
-   │ 09:15–   │ vol_pctile ≥ 0.90    │                      │ (& not crisis)│ else (18–22) │
-   │ 15:15    │                      │                      │               │              │
+   │ outside  │ VIX≥25 OR vol_pctile │ ADX ≥ 22             │ ADX < 18      │ everything   │
+   │ 09:15–   │ ≥0.90 OR FinBERT     │                      │ (& not crisis)│ else (18–22) │
+   │ 15:15    │ neg-sentiment        │                      │               │              │
    └────┬─────┴──────────┬───────────┴──────────┬───────────┴──────┬────────┴──────┬───────┘
         ▼                ▼                       ▼                  ▼               ▼
-     arm none         arm none          {orb, supertrend_adx}   {vwap_revert}    {orb}
+     arm none         arm none        TREND set (orb, orb_confirmed,   RANGE set     TRANSITION set
+                                      supertrend_adx/_multi, ma_cross, (vwap_revert/  (orb/_confirmed,
+                                      donchian, momentum, macd_cross,  _rsi, rsi_*,   donchian, bb_squeeze,
+                                      stoch_adx)                       bollinger_rev) inside_bar, stoch_adx)
                                               │                       │              │
                                               └───────────┬───────────┴──────────────┘
                                                           ▼
@@ -222,8 +252,8 @@ shadow for ≥1 week, with kill switch reachable.
         └───────────────┬───────────────┬──────────────┘
                         │               │
               ┌─────────▼───┐     ┌──────▼─────────────┐
-              │ G5 store     │✅   │ G1 real instrument │⚠️
-              │ everything   │     │ (NIFTY/SENSEX)     │
+              │ G5 store     │✅   │ G1 real instrument │✅ ETF map + options
+              │ everything   │     │ (NIFTY/SENSEX)     │   router built (live-untested)
               └─────┬────────┘     └────────────────────┘
                     │
           ┌─────────▼───────────────┐
@@ -247,7 +277,7 @@ shadow for ≥1 week, with kill switch reachable.
 | mode | `TITAN_MODE` | `paper` | paper vs live |
 | sim_mode | `TITAN_SIM_MODE` | `0` (False) | use simulation clock |
 | capital | `TITAN_CAPITAL` | `500000.0` | paper notional (large for statistical signal) |
-| universe | `TITAN_UNIVERSE` | `NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK` | traded symbols |
+| universe | `TITAN_UNIVERSE` | `NIFTY,BANKNIFTY,FINNIFTY,RELIANCE,HDFCBANK,ICICIBANK` | **static fallback**; `settings.symbols` prefers the dynamic Redis selection `titan:universe:selected` (§5.17), else this |
 | instrument_kind | `TITAN_INSTRUMENT_KIND` | `ETF` | ETF / OPTION / INDEX / EQUITY |
 
 **Risk limits** (all % are of `capital`; INR values shown for ₹500K)
@@ -261,6 +291,20 @@ shadow for ≥1 week, with kill switch reachable.
 | max_consecutive_losses | `TITAN_MAX_CONSECUTIVE_LOSSES` | `5` | count |
 | max_concurrent_positions | `TITAN_MAX_CONCURRENT_POSITIONS` | `3` | count |
 | intraday_square_off | `TITAN_INTRADAY_SQUARE_OFF` | `15:15` | IST cutoff |
+| **mis_leverage** | `TITAN_MIS_LEVERAGE` | `5.0` | intraday leverage for the funds gate (notional ≤ cash × this) |
+
+**Tick sanitizer (§5.3)**
+| Setting | Env var | Default |
+|---|---|---|
+| tick_filter_enabled | `TITAN_TICK_FILTER_ENABLED` | `True` |
+| tick_outlier_sigma | `TITAN_TICK_OUTLIER_SIGMA` | `4.0` |
+| tick_filter_window_s | `TITAN_TICK_FILTER_WINDOW_S` | `300` |
+| tick_filter_min_samples | `TITAN_TICK_FILTER_MIN_SAMPLES` | `20` |
+| tick_max_ts_drift_s | `TITAN_TICK_MAX_TS_DRIFT_S` | `300` |
+| tick_session_gap_s | `TITAN_TICK_SESSION_GAP_S` | `3600` |
+
+**News-override (CRISIS):** `regime_news_override`, `regime_news_crisis_p` gate the
+live FinBERT preemptive-CRISIS path (§5.18).
 
 **Auto-pilot**
 | Setting | Env var | Default |
@@ -314,6 +358,13 @@ shadow for ≥1 week, with kill switch reachable.
 | `titan:vix` | String | (external) | auto-pilot | India VIX input |
 | `titan:sim:enabled` | String "0"/"1" | API `/sim/*` | clock, feed_supervisor | simulation clock toggle |
 | `titan:mode:synthetic` | String "1" | synth_feed | dashboard | 🧪 SYNTH pill |
+| `titan:universe:selected` | String (CSV) | `data.universe` | config `settings.symbols` | dynamic top-N universe |
+| `titan:universe:selected_at` | String (ISO) | `data.universe` | — | selection timestamp |
+| `titan:session:status` | String ACTIVE/HALTED | supervisor | dashboard | session halt state |
+| `titan:session:reason` | String | supervisor | dashboard | halt reason |
+| `titan:session:realized_pnl` | String | supervisor | dashboard (Today P&L) | sim-day realized P&L |
+| `titan:consec_losses` | String | supervisor | dashboard | loss-streak counter |
+| `titan:risk:state:<date>` / `:latest` | Hash | `risk/state_store` | inspection | daily risk-state snapshot |
 
 ### 5.3 Data feed & bars
 
@@ -331,6 +382,13 @@ shadow for ≥1 week, with kill switch reachable.
 - **Timeframes (seconds):** `1m=60, 3m=180, 5m=300, 15m=900, 1d=86400`. Bucket =
   `epoch − (epoch % seconds)`. **1d aligns to UTC midnight**, not the IST session
   (documented as a future refinement).
+- **Tick sanitizer (`data/tick_filter.py`):** before a tick enters a bar, the
+  bar_writer runs `TickSanitizer` — rejects prices > **Nσ (4)** from the trailing
+  VWAP window (corrupt-tick guard), and rejects **timestamp anomalies**: a tick
+  drifting > `tick_max_ts_drift_s` (300s) from the latest is dropped, while a
+  large *forward* jump > `tick_session_gap_s` (3600s) is treated as a legitimate
+  new session (window reset, not rejected — so the synth 15:30→09:15 wrap doesn't
+  stall the stream). Rejected ticks are dead-lettered/logged, not aggregated.
 - **Storage:** `ohlcv` hypertable, PK `(symbol, timeframe, ts)`, upsert on
   conflict. **Publish:** `bars:<symbol>:<tf>` JSON `{ts,o,h,l,c,v}`.
 - **synth_feed (dev only):** 1 tick / 0.2s, sim-time +30s per tick (a 5m bar
@@ -358,7 +416,12 @@ bar, ascending, columns `o,h,l,c,v`). Class vars: `name`, `timeframe`
 reason, confidence(=1.0)` with property `per_unit_risk = |entry − stop|`.
 **`SignalKind(StrEnum)`** = {`ENTRY_LONG`, `ENTRY_SHORT`, `EXIT`}.
 
-**Named, live-capable strategies (`registry.BASE_STRATEGIES`):**
+**`registry.BASE_STRATEGIES` now has 17 strategies** (was 4): the 3 originals
+detailed below + TSMOM(killed) + the activated library families (`ma_cross`,
+`donchian`, `rsi_revert`, `bollinger_revert`, `momentum`) + new confirmation
+variants in `variants.py` (`orb_confirmed`, `vwap_rsi`, `bb_squeeze`, `macd_cross`,
+`stoch_adx`, `rsi_divergence`, `supertrend_multi`, `inside_bar`). See the new-family
+table further down. The 3 original named strategies:
 
 **ORB (`orb.py`)** — defaults `or_minutes=15, target_r=1.5, cutoff="14:30",
 session_open="09:15"` (all IST). Opening range = high/low over
@@ -383,7 +446,7 @@ uptrend `st=max(lower, prev_st)`, flip to down when `close<st` (then
 `st=upper`). ADX: `+DM=(up>dn & up>0)·up`, `−DM=(dn>up & dn>0)·dn`,
 `±DI=100·SMA(±DM,p)/atr`, `DX=100·|+DI−−DI|/(+DI+−DI)`, `ADX=SMA(DX,p)`. Entry
 only on a direction flip (`dir[-1]≠dir[-2]`) **and** `ADX>20`; stop = the ST
-line; no target.
+line; **target_r=2.0** ATR target added (was target-less → 0% win on synthetic).
 
 **TSMOM (`tsmom.py`)** — defaults `lookback=20, vol_window=60, vol_target=0.10,
 stop_sigma=2.0`, `ANN=252`. `r_lb = log(c[-1]/c[-lookback-1])`. Enter LONG if
@@ -407,12 +470,31 @@ emitting only on a direction *transition*. Variant `key =
 | MomentumROC (`momentum`) | lookback `[10,20,40,60]` × atr_mult `[2.0,3.0]` | ROC crosses zero | ATR stop / none | **8** |
 
 Total **59**. `factory.all_variants()` → `VariantSpec(key, family, cls, params)`
-with `build(symbol)`; the vetting harness builds and tests each.
+with `build(symbol)`; the vetting harness builds and tests each. The 5 families
+above are also registered as live strategies (canonical params); `ma_cross` and
+`momentum` gained a **target_r=2.0** ATR target.
 
-**Indicators (`indicators.py`), leak-free pandas series:** `ema`
-(`ewm(span,adjust=False)`), `sma`, `roc` (`s/s.shift(p)−1`), `true_range`,
-`atr` (default 14), `rsi` (Wilder `ewm(alpha=1/p)`, 14), `bollinger` (20, k=2 →
-mid/upper/lower), `donchian` (20, `.shift(1)` no look-ahead → upper/lower).
+**New strategies (`variants.py`, docs/13–14 work) — all carry ATR R-multiple targets:**
+
+| Name | Style | Regime | Logic |
+|---|---|---|---|
+| `orb_confirmed` | breakout | TREND/TRANS | ORB + volume-expansion & EMA-slope confirmation (subclass via ORB `_confirm` hook) |
+| `vwap_rsi` | mean-rev | RANGE | VWAP-revert with 2.5×ATR stop + RSI-exhaustion gate |
+| `bb_squeeze` | breakout | TRANSITION | breakout out of a low-BBW compression (distinct from bollinger-revert) |
+| `macd_cross` | trend | TREND | MACD line × signal crossover |
+| `stoch_adx` | momentum | TREND/TRANS | StochRSI %K×%D crossover gated by ADX |
+| `rsi_divergence` | mean-rev | RANGE/TRANS | price lower-low vs RSI higher-low (and mirror) |
+| `supertrend_multi` | trend | TREND | two Supertrends (fast+slow) must agree on direction |
+| `inside_bar` | breakout | TRANSITION | inside-bar contraction → break of the mother bar |
+
+**Indicators (`indicators.py`), leak-free pandas series:** `ema`, `sma`, `roc`,
+`true_range`, `atr` (14), `rsi` (Wilder, 14), `bollinger` (20, k=2), `donchian`
+(20, `.shift(1)`), and added: **`macd`** (12/26/9 → line/signal/hist),
+**`stoch_rsi`** (→ %K/%D), **`adx`** (Wilder), **`supertrend`** (→ line/direction).
+
+**Cross-strategy utilities:** `pairs.py` — stat-arb scanner (correlation + spread
+z-score over the universe; standalone, needs a dedicated runner for live).
+`risk/allocator.py` — inverse-vol / risk-parity strategy weighting.
 
 **Supervisor orchestration (`supervisor.py`).** On each `bars:<sym>:<tf>` event:
 (1) `_check_exits()` — SL/TP against open trades; (2) for each enabled strategy
@@ -438,9 +520,12 @@ ADX is Wilder-style (needs ≥42 bars); realized vol is annualized
 (`σ × √(75·252)`, 75 = 5m bars/day); vol percentile is rolling over the lookback.
 `RegimeReading` captures every feature + a plain-English `reason`.
 
-**Selector (`selector.py`):** `REGIME_CANDIDATES = {TREND:{orb,
-supertrend_adx}, RANGE:{vwap_revert}, TRANSITION:{orb}, CRISIS:set(),
-CLOSED:set()}`. The target is `candidates ∩ validated_set` — so an unvalidated or
+**Selector (`selector.py`):** `REGIME_CANDIDATES` (current) —
+TREND: {orb, orb_confirmed, supertrend_adx, supertrend_multi, ma_cross, donchian,
+momentum, macd_cross, stoch_adx}; RANGE: {vwap_revert, vwap_rsi, rsi_revert,
+bollinger_revert, rsi_divergence}; TRANSITION: {orb, orb_confirmed, donchian,
+bb_squeeze, inside_bar, stoch_adx, rsi_divergence}; CRISIS/CLOSED: ∅.
+The target is `candidates ∩ validated_set` — so an unvalidated or
 killed strategy **cannot** be armed even if its regime is active. Validated set
 reads Redis `titan:autopilot:validated` (fallback `.env` `orb`). When armed it
 reconciles `titan:strategies:enabled` (sadd/srem within its own lane); always
@@ -473,8 +558,20 @@ reject without halting:
 
 Then **per-trade-risk**: `trade_risk = per_unit_risk × qty`; if it exceeds
 `max_risk_per_trade_inr` the order is **auto-downsized** (`adjusted_qty`) rather
-than rejected. Finally a **funds** check for BUYs. (README's "11 gates" = these 10
-+ the per-trade-risk/funds checks.)
+than rejected. Finally a **funds** check for BUYs — now `notional ≤ available_cash
+× limits.leverage` (intraday MIS, default **5×**) so index longs aren't
+systematically funds-rejected on a small account.
+
+**Daily self-recovery (`_maybe_roll`):** at the start of each new trading day the
+engine resets the DAILY counters (realized_pnl_today, consecutive_losses,
+halted_today, halt_reason) so a daily halt clears next session instead of
+latching; multi-day risk (drawdown vs peak_equity, weekly loss) persists.
+NOTE: a drawdown halt is therefore *not* daily — once peak≫current it stays
+halted until equity recovers or the account is re-funded (observed in operation).
+
+**risk_events persistence:** the supervisor records each halt/profit-lock/kill
+episode to the `risk_events` table (deduped per episode) — the dashboard's "Recent
+risk events" reads it.
 
 **`RiskState`:** starting/peak/current equity, realized_pnl_today/week,
 open_positions, consecutive_losses (reset to 0 on any win), halted_today,
@@ -567,7 +664,7 @@ signal → order → fill without DB round-trips. **Every write is best-effort**
 exceptions logged, never raised into the trading loop. Realized slippage =
 `(fill_price − ltp_at_decision)/ltp_at_decision × 1e4` bps.
 
-**17 tables (4 TimescaleDB hypertables on `ts`: `ohlcv`, `risk_events`,
+**19 tables (4 TimescaleDB hypertables on `ts`: `ohlcv`, `risk_events`,
 `equity_curve`, `regime_decisions`). No compression/retention policy set yet.**
 Numeric types omitted for brevity — all prices `NUMERIC(12–14,4)`, pnl `(14–16,2)`.
 
@@ -591,10 +688,13 @@ Numeric types omitted for brevity — all prices `NUMERIC(12–14,4)`, pnl `(14�
 | 006 | `feature_snapshots` | **id**(uuid), ts(now), strategy, symbol, signal_id, features(jsonb) · idx(ts↓) |
 | 007 | `trades.regime` | TEXT · idx(regime) |
 | 008 | `leaderboard` | **variant_key**, ts(now), family, params(jsonb), trades, net_pnl, sharpe, deflated_threshold, profit_factor, max_dd_pct, symbols_tested, symbols_profitable, passed(f), verdict, reasons · idx(verdict, sharpe↓) |
+| 009 | `operator_decisions` | **id**(bigserial), ts(now), actor, category, title, action, rationale, thinking, params(jsonb), expected, status · idx(ts↓),(category,ts↓) — the autonomous-operator journal |
+| 010 | `universe_selection` | **id**(bigserial), selected_at, symbol, rank, score, liquidity, realized_vol, selected(bool), reason · idx(selected_at↓,rank) — dynamic-universe analysis log |
+| 011 | `trades.signal_emitted_at`, `trades.order_filled_at` | TIMESTAMPTZ — latency telemetry (entry_ts stays the bar ts) |
 
 Constraints summary: 3 FKs (news_entities, news_signals → news_events, ON DELETE
 CASCADE), 2 uniq (news_events, news_signals), 1 CHECK (direction), 2 partial
-indexes (would_fire, direction).
+indexes (would_fire, direction). **19 tables; migrations 001–011.**
 
 ### 5.11 API surface (FastAPI, `:8000`)
 
@@ -652,20 +752,18 @@ evidence only.
 
 ### 5.13 Dashboard (Streamlit, `:8501`)
 
-8 tabs (`st.tabs`), 5s `st_autorefresh`: **📈 Charts** (ohlcv + VWAP + volume +
-trade overlays/markers/SL-TP lines; synthetic fallback when DB empty),
-**📊 Positions** (open trades), **📒 Journal** (closed trades + win-rate KPIs),
-**🤖 Strategies** (4 strategies; heartbeat; toggles — disabled when killed or
-auto-pilot armed; arm/disarm control; regime pill), **🔬 Analytics** (signal
-funnel, realized-vs-modeled slippage, P&L by strategy×regime, rejected signals),
-**📰 News** (news_signals with lookback/fires/score filters), **🛡️ Risk**
-(session status banner, profit/loss/drawdown budget bars, kill + flatten
-controls, risk_events log), **⚙️ System** (mode/redis/pg/api health, feed
-status+age, clock, universe). Reads Redis (`titan:ltp:*`, `:heartbeat:*`,
-`:kill`, `:strategies:enabled`, `:sim:enabled`, `:mode:synthetic`,
-`:regime:current/reason`, `:autopilot:enabled`, `:session:status/reason`,
-`:feed:status/age_s`) + Postgres queries + API calls (`/status`, `/kill`,
-`/flatten`, `/autopilot/{arm,disarm}`, `/strategies/{name}/{start,stop}`).
+8 tabs (`st.tabs`), 5s `st_autorefresh`, **12-hour (AM/PM) timestamps throughout**:
+**📈 Charts** (ohlcv + VWAP + volume + trade markers/SL-TP lines), **📊 Positions**
+(live mark-to-market: LTP, unrealized P&L ₹+%, 🟢LONG/🔴SHORT, colour-coded,
+summary), **📒 Journal** (closed trades with Result ✅/❌, Return %, held-min, exit
+reason, colour-coded P&L, profit-factor KPI), **🤖 Strategies** (**all 17** grouped
+ACTIVE-NOW / AVAILABLE / KILLED, inline toggle, **per-strategy performance**
+trades·win%·net, ARMED-IN regimes, heartbeat; auto-pilot banner with ACTIVE-NOW
+pills + arm/disarm), **🔬 Analytics** (signal funnel, slippage, P&L by
+strategy×regime, rejected signals), **📰 News**, **🛡️ Risk** (session banner,
+budget bars, kill+flatten, **working risk_events table**), **⚙️ System**. Reads
+the Redis keys in §5.2 + Postgres + the API. **Today P&L** reads
+`titan:session:realized_pnl` (sim-day correct), not a `CURRENT_DATE` query.
 
 ### 5.14 Telemetry (`telemetry/`)
 
@@ -718,46 +816,86 @@ Redis); `readiness_check.sh` **6 gates** — ≥5 paper closed trades · ≥1
 risk_event · shadow-dry vs paper diff ≤2 · 0 instrument_not_found · Angel
 availablecash ≥₹5000 · creds rotated (no default key/TOTP in `.env`).
 
-**Tests (~20 files):** `test_aggregator`, `test_analytics_recorder`,
-`test_clock`, `test_feed_supervisor`, `test_instrument_kind`,
-`test_news_category_v2`, `test_paper_broker`, `test_risk_engine`, `test_sizing`,
-`test_strategy_factory`, `test_supervisor_flatten`, `test_walk_forward`,
-`test_data/test_feed_symbol_mapping` (the 2026-06-15 ORB-silence regression),
-`test_decision/{test_regime,test_selector}`, `test_news/{test_category,
-test_entities,test_sentiment_cache}`, `test_strategies/{test_orb,test_tsmom}`.
-123 pass (1 `bs4`-dependency news test excluded in the current env).
+**Tests:** the above plus `test_data/test_tick_filter`, `test_data/test_universe`,
+`test_strategies/test_variants`, `test_strategies/test_new_strategies`, and the
+`test_risk_engine` daily-roll case. **203 pass** (1 `bs4`-dependency news test
+excluded in the current env).
+
+### 5.17 Dynamic universe & operator layer
+
+**Dynamic universe (`data/universe.py`):** `analyze_and_select(n=50)` ranks a
+61-name liquid-NSE candidate pool by a liquidity/turnover proxy (folding in
+realized-vol from existing OHLCV), keeps the regime-reference symbol, writes the
+chosen list to Redis `titan:universe:selected` + the full ranking to the
+`universe_selection` table. `settings.symbols` reads that key (5s-cached, safe
+fallback to `TITAN_UNIVERSE`), so the feed/bar_writer/supervisor/dashboard/api all
+pick it up on restart. CLI: `python -m titan.data.universe -n 50`.
+
+**Operator journal:** the `operator_decisions` table (migration 009) +
+`scripts/operator_log.py` (stdin-JSON → row) + `docs/operator_journal.md`
+(narrative). Every autonomous-operator decision/review is logged with
+action/rationale/thinking/expected. Query: `SELECT * FROM operator_decisions
+ORDER BY id;`.
+
+### 5.18 Resilience & Track-B (merged from main)
+
+- **Order idempotency (`execution/locks.py`):** Redis distributed lock per
+  symbol/capital around order dispatch + reconciliation, so a broker timeout
+  can't double-fire.
+- **Rate limiting (`execution/rate_limit.py`):** client-side token bucket to keep
+  under the 10-orders/sec SEBI/broker cap.
+- **Options routing (`execution/options.py`):** maps an underlying signal → weekly
+  ATM(±) option contract with 2026 lot sizes, midpoint limit pricing, and a
+  **pre-trade margin check** that steps OTM (downsize/pivot) if SPAN+exposure
+  won't fit the account. Live-untested.
+- **Live FinBERT CRISIS override (`decision/regime.py` + `news/sentiment_stream.py`):**
+  if the live negative-sentiment probability ≥ `regime_news_crisis_p` (gated by
+  `regime_news_override`), the classifier preemptively forces **CRISIS** (arm
+  nothing) ahead of the lagging ADX/vol indicators. The auto-pilot feeds
+  `news_neg_p` each tick.
 
 ---
 
 ## 6. How we are doing (honest status)
 
 **Strong / done:**
-- ✅ Full data pipeline (feed → bars → strategies → risk → broker → storage) works end-to-end in paper mode.
-- ✅ 123 automated tests pass.
-- ✅ Real Angel One feed + feed supervisor (auto lifecycle, 30s staleness watchdog, backoff reconnect).
-- ✅ Honest market clock + NSE holiday file — no more "pretend it's 11am" hacks.
-- ✅ Decision engine / auto-pilot with full `regime_decisions` audit trail.
-- ✅ Analytics capture: every signal, order attempt, fill, and feature snapshot (best-effort, non-blocking).
-- ✅ Strategy factory (59 variants) + walk-forward vetting with **deflated-Sharpe** (anti data-dredging) + leaderboard + `--promote`.
-- ✅ Defense in depth: 10 risk gates + per-trade auto-downsizing + 5 broker gates + kill switch + EOD square-off.
-- ✅ Real historical backfill verified (so vetting can run on real data).
+- ✅ Full pipeline (feed → tick-sanitizer → bars → 17 strategies → risk → broker → storage) end-to-end in paper.
+- ✅ **203 tests pass.**
+- ✅ Real Angel One feed + supervisor (auto lifecycle, staleness watchdog, backoff) + **Nσ/timestamp tick sanitizer**.
+- ✅ Honest clock + NSE holiday file. Decision engine/auto-pilot + `regime_decisions` audit + **live FinBERT CRISIS override**.
+- ✅ Full analytics capture + **operator-decision journal**.
+- ✅ Strategy factory (59) + **17 live strategies** (targets on the trend ones) + walk-forward/deflated-Sharpe vetting + leaderboard.
+- ✅ Defense in depth: 10 risk gates + auto-downsize + 5 broker gates + kill + EOD square-off + **daily self-recovery** + **order locks** + **10-OPS rate limiter** + **MIS-leverage funds gate**.
+- ✅ **Dynamic top-N universe** by liquidity. **Options-routing layer + pre-trade margin check** (built, live-untested).
+- ✅ Reworked Streamlit dashboard (per-strategy perf, live-P&L tables, working risk-events, 12h time).
 
 **In progress / partial:**
-- ⚠️ React UI is a **scaffold** (header, KPI strip, chart wired; positions/journal/strategies/analytics/risk tabs + live WebSocket not built). Streamlit remains the working UI.
-- ⚠️ G1 instrument routing: ETF mapping exists; **options routing (strike/expiry) not built**.
+- ⚠️ React UI still a **scaffold**; Streamlit remains the working UI.
+- ⚠️ Options routing built but **not live-tested**; ETF path not yet wired end-to-end through the supervisor.
+- ⚠️ `pairs.py` is a standalone scanner — needs a dedicated runner to trade live (per-symbol `on_bar` can't drive pairs).
 
 **Not yet verified / open:**
-- 🔴 Not trading real money.
-- 🔴 Live tick **streaming** unverified until a real market-open session (auth path verified).
-- 🔴 P3 verdicts only become meaningful once vetting runs at scale on **backfilled real history**.
-- 🔴 1d bars align to UTC midnight, not the IST session (fine for daily-trend, refine later).
-- 🔴 Backtest engine path is effectively **LONG-only** today — SHORT-side verdicts not yet measured.
+- 🔴 Not trading real money; live WS streaming unverified until a real market-open session.
+- 🔴 **All current results are SYNTHETIC** — verdicts require real-data walk-forward; relative reads only (e.g. RANGE mean-reversion > trend on the random walk; donchian/supertrend_multi/inside_bar persistent laggards).
+- 🔴 Backtest engine effectively **LONG-only**; 1d bars align to UTC midnight; drawdown halt latches (not daily) so a ruined paper account needs a re-fund.
+- 🔴 Sizing starves on a large universe — many **"sizing → 0 qty"** rejections for high-priced names (per-trade-risk/price); revisit sizing.
 
 ---
 
 ## 7. How we can improve it — prioritised plan
 
 Ordered by leverage (highest value / lowest risk first). Effort: S/M/L/XL.
+
+> **Synced 2026-06-23 — already landed since first draft:** options-routing layer +
+> margin check (#7, live-untested), risk-parity allocator (#12, correlation filter
+> still TODO), slippage realized-vs-modeled surfaced in the dashboard (#9),
+> order locks + 10-OPS rate limiter, live FinBERT CRISIS override, dynamic
+> universe, daily risk self-recovery, tick sanitizer.
+> **New items to add:** (a) fix **"sizing → 0 qty"** starvation on a large/high-priced
+> universe (min-lot / volatility-scaled / notional-floor sizing); (b) make the
+> **drawdown halt recover** (it currently latches until re-fund); (c) build a
+> **pairs runner** so `pairs.py` can trade live; (d) prune the persistent laggards
+> (donchian/supertrend_multi/inside_bar) once real-data WF confirms.
 
 ### Tier 1 — finish the evidence base (do these first)
 1. **Run mass walk-forward on real backfilled history** across all 59 variants → populate the leaderboard with trustworthy verdicts. *The whole go-live decision rests on this.* **[M]**
@@ -815,6 +953,10 @@ Ordered by leverage (highest value / lowest risk first). Effort: S/M/L/XL.
 | See the dashboard tabs & data sources | this §5.13, `titan/dashboard/app.py` |
 | See instrument mapping / backfill | this §5.15, `config/instrument_map.yaml`, `titan/data/` |
 | Deploy / dependencies / tests | this §5.16, `pyproject.toml`, `docker-compose.yml` |
+| Dynamic universe + operator journal | this §5.17, `titan/data/universe.py`, `operator_decisions`/`docs/operator_journal.md` |
+| Order locks / rate limit / options / FinBERT override | this §5.18, `titan/execution/`, `titan/decision/regime.py` |
+| New/confirmation strategies + pairs/allocator | this §5.5, `titan/strategies/variants.py`/`pairs.py`, `titan/risk/allocator.py` |
+| Latest session analysis | `docs/analysis/` |
 | Find a Redis key or env var | this §5.1 + §5.2 |
 | Read the deep roadmap analysis | `docs/09_roadmap_analysis.md` |
 | See what changed recently & why | `docs/10_changes_and_decisions.md`, `AUTOPSY_FINDINGS.md` |
@@ -825,5 +967,7 @@ Ordered by leverage (highest value / lowest risk first). Effort: S/M/L/XL.
 ---
 
 *This is a living document — update §2, §5, and §6 as goals are met, thresholds
-change, or new subsystems land. The numbers in §5 were cross-checked against
-source on 2026-06-20; if code and doc disagree, the code wins — fix the doc.*
+change, or new subsystems land. Last synced to source **2026-06-23** (17
+strategies, dynamic universe, resilience/Track-B, operator layer, dashboard
+rework, migrations 001–011, 203 tests). If code and doc disagree, the code wins —
+fix the doc.*
