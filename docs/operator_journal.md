@@ -114,3 +114,49 @@ Cross-reference with `trades`, `signals`, `fills`, `regime_decisions` over the
 same window to test each `expected` hypothesis.
 
 ### 2026-06-22 — Review #5 (decision #24): still halted (drawdown), no change; awaiting prune / daily-loss-cap authorization.
+
+### 2026-06-22 — Review #6 (decision #28): fresh 17-strategy run flipped PROFITABLE (+59,682, synthetic noise — lucky trending stretch); halted on profit-lock not ruin; held. inside_bar/donchian still bleed.
+
+### 2026-06-22 — Review #7 (decision #29): healthy, profit-locked (+62,774 synthetic), slow accrual; held.
+
+### 2026-06-22 — Review #8 (decision #30): healthy, profit-locked, steady idle (+63,251); held. inside_bar still worst.
+
+### 2026-06-22 — Review #9 (decision #31): unchanged, healthy profit-locked idle (+65,231); held.
+
+### 2026-06-22 — Review #10 (decision #32): unchanged, healthy profit-locked idle (+66,632); held.
+
+### 2026-06-22 — Review #11 (decision #33): unchanged, healthy profit-locked idle (+66,607); held.
+
+### 2026-06-22 — Review #12 (decision #34): unchanged, fully idle (+66,607); held.
+
+### 2026-06-22 — Review #13 (decision #35): unchanged, fully idle (+66,607); held.
+
+### 2026-06-22 — Review #14 (decision #36): unchanged, fully idle (+66,607); held.
+
+### 2026-06-22 — Review #15 (decision #37): unchanged, fully idle (+66,607); held.
+
+### 2026-06-22 — Review #16 (decision #38): unchanged, fully idle (+66,607); held.
+
+### 2026-06-23 — Review #17 (decision #39): broke out of idle, ACTIVE, 1648 trades, realized +38,612; win-rates normalized. Targets-fix validated (ma_cross/supertrend_adx/macd_cross net+); worst now supertrend_multi (-8967). Held.
+
+### 2026-06-23 — Review #18 (decision #40): active, stable (+38,634, 1789 trades); best stoch_adx, worst supertrend_multi; held.
+
+### 2026-06-23 — Review #19 (decision #41): active, stable (+38,638); held.
+
+### 2026-06-23 — Review #20 (decision #42): active, stable (+38,635); held.
+
+### 2026-06-23 — Review #21 (decision #43): active, stable (+38,636); held.
+
+### 2026-06-23 — Review #22 (decision #44): active, stable (+38,637); held.
+
+### 2026-06-23 — Review #23 (decision #45): active, unchanged (+38,637); held.
+
+### 2026-06-23 — Review #24 (decision #46): active, unchanged (+38,636); held.
+
+### 2026-06-23 — Review #25 (decision #47): active, unchanged (+38,636); held.
+
+### 2026-06-23 — Review #26 (decision #48): user-requested fresh restart for today; backed up prior run (+38,636/1816 trades), reset to clean 50k, ACTIVE.
+
+### 2026-06-23 — Review #27 (decision #49): fresh run bleeding (-17,244, synthetic variance); donchian worst (-12454); held.
+
+### 2026-06-23 — Review #28 (decision #50): active, bleeding flat (-17,246); held.
