@@ -160,3 +160,5 @@ same window to test each `expected` hypothesis.
 ### 2026-06-23 — Review #27 (decision #49): fresh run bleeding (-17,244, synthetic variance); donchian worst (-12454); held.
 
 ### 2026-06-23 — Review #28 (decision #50): active, bleeding flat (-17,246); held.
+
+### 2026-06-23 — Review #29 (decision #51): active, bleeding flat (-17,241); held.
