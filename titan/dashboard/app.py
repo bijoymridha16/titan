@@ -350,6 +350,14 @@ if sim_on:
     _extra_pills += '<span class="pill bg-warn">🧪 SIMULATION · not live market</span>'
 elif not market_open_real:
     _extra_pills += '<span class="pill pill-close">⏸ TRADING PAUSED · NSE CLOSED</span>'
+else:
+    # Calendar says open — verify the exchange actually traded today. The static
+    # holiday YAML misses movable festival dates and unforeseen halts; the
+    # runtime probe (cached for the day) catches them.
+    _traded = r.get("titan:market:traded:" + now_ist.date().isoformat())
+    if _traded == "0":
+        _extra_pills += '<span class="pill pill-close">🏖 NSE HOLIDAY · no trades today</span>'
+        phase, phase_cls = "HOLIDAY", "pill-close"
 
 # auto-pilot regime pill (live decision from titan/decision)
 _regime = r.get("titan:regime:current")

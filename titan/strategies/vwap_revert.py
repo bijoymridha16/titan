@@ -24,7 +24,12 @@ class VWAPRevert(Strategy):
     name = "vwap_revert"
     timeframe = "5m"
 
-    DEFAULTS = {"k_sigma": 2.0, "atr_period": 14, "atr_mult": 1.0, "lookback": 20}
+    # target_buffer_sigma: how far past VWAP (in σ) to set target.
+    # 0.0 = exactly VWAP (old behaviour — gave tiny target windows + 1:23 R:R).
+    # >0  = expect price to overshoot VWAP slightly, widening reward leg.
+    DEFAULTS = {"k_sigma": 2.0, "atr_period": 14, "atr_mult": 1.0,
+                "lookback": 20, "target_buffer_sigma": 0.5,
+                "min_today_bars": 6}
 
     def __init__(self, symbol: str, params: Optional[dict] = None):
         super().__init__(symbol, {**self.DEFAULTS, **(params or {})})
@@ -33,7 +38,10 @@ class VWAPRevert(Strategy):
         if len(bars) < max(self.params["atr_period"], self.params["lookback"]) + 2:
             return []
         today = bars[bars.index.date == bars.index[-1].date()]  # type: ignore[attr-defined]
-        if today.empty:
+        # Require enough today-bars so VWAP and sigma are meaningful. Without
+        # this, an early-session bar gives VWAP ~= last close and a sigma close
+        # to 0 — z-score blows up and entries fire on noise with no target room.
+        if len(today) < self.params["min_today_bars"]:
             return []
 
         pv = (today["c"] * today["v"]).cumsum()
@@ -61,12 +69,16 @@ class VWAPRevert(Strategy):
             return []
 
         ts = bars.index[-1]
+        buf = float(self.params["target_buffer_sigma"]) * float(sigma)
         if z > k:
+            # SELL: target is VWAP minus buffer (price overshoots past VWAP).
             return [Signal(ts, self.symbol, SignalKind.ENTRY_SHORT,
                            entry=last_c, stop=last_c + self.params["atr_mult"] * atr,
-                           target=float(vwap), reason=f"VWAP+{z:.1f}σ revert short")]
+                           target=float(vwap) - buf,
+                           reason=f"VWAP+{z:.1f}σ revert short")]
         if z < -k:
             return [Signal(ts, self.symbol, SignalKind.ENTRY_LONG,
                            entry=last_c, stop=last_c - self.params["atr_mult"] * atr,
-                           target=float(vwap), reason=f"VWAP{z:.1f}σ revert long")]
+                           target=float(vwap) + buf,
+                           reason=f"VWAP{z:.1f}σ revert long")]
         return []

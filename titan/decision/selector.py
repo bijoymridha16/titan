@@ -37,10 +37,15 @@ ENABLED_KEY = "titan:strategies:enabled"
 # Grounded in docs/02_strategy_rankings.md §6:
 #   trend regime → breakout + trend-follow ; range regime → mean-revert ;
 #   crisis → flat ; transition → only the most-evidenced single strategy.
+# orb quarantined 2026-06-29: −₹5,323 over 71 trades (PF 0.69, 40.8% win) in
+# paper validation. Re-enable only after the structural-stop ORB variant is
+# backtested per docs/research notes.
+QUARANTINED: set[str] = {"orb"}
+
 REGIME_CANDIDATES: dict[Regime, set[str]] = {
-    Regime.TREND: {"orb", "supertrend_adx"},
+    Regime.TREND: {"supertrend_adx"},
     Regime.RANGE: {"vwap_revert"},
-    Regime.TRANSITION: {"orb"},
+    Regime.TRANSITION: set(),
     Regime.CRISIS: set(),
     Regime.CLOSED: set(),
 }

@@ -230,6 +230,25 @@ class Supervisor:
 
     # ─────────────── core loop ───────────────
     async def _on_bar_event(self, symbol: str, tf: str, bar: dict) -> None:
+        # Reject stale bars replayed from Redis on restart (gotcha:
+        # bar_writer / pubsub can re-fire yesterday's last bar after a daemon
+        # restart, causing the strategy to trade on EOD prices with current-day
+        # timestamps in logs but stale `entry_ts` in DB).
+        bar_ts = bar.get("ts")
+        if bar_ts is not None:
+            try:
+                ts = _to_utc(bar_ts)
+                age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+                # bar.ts is bar START, so a fresh bar's age == tf duration at close.
+                # Allow tf seconds + 60s grace before treating as a stale replay.
+                tf_secs = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1d": 86400}.get(tf, 300)
+                if age_s > tf_secs + 60:
+                    log.warning("drop stale bar %s %s age=%.0fs (tf=%ds)",
+                                symbol, tf, age_s, tf_secs)
+                    return
+            except Exception:
+                pass
+
         await self._refresh_ltps()
         enabled = await self.r.smembers("titan:strategies:enabled") or set()
         if not enabled:
@@ -255,7 +274,7 @@ class Supervisor:
             except Exception as e:
                 log.exception("%s.on_bar(%s) failed: %s", name, symbol, e)
                 continue
-            regime = await self.r.get("titan:regime:current")
+            regime = await self.r.get("titan:regime:current") or "UNKNOWN"
             last = window.iloc[-1]
             features = {"o": float(last["o"]), "h": float(last["h"]),
                         "l": float(last["l"]), "c": float(last["c"]),
@@ -410,7 +429,10 @@ class Supervisor:
                 elif t.target and l <= t.target: exit_price, reason = t.target, "target"
             if exit_price is None:
                 continue
-            await self._close_trade(t, exit_price, reason, ts)
+            # Clamp: bar["ts"] is bar START. For tiers > entry interval (e.g. 1d
+            # bar evaluating an intraday entry) this would land BEFORE entry_ts.
+            exit_ts = max(ts, t.entry_ts)
+            await self._close_trade(t, exit_price, reason, exit_ts)
 
     async def _close_trade(self, t: "OpenTrade", exit_price: float,
                            reason: str, ts: datetime) -> None:

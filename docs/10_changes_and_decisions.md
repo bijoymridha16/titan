@@ -104,3 +104,39 @@ feature wired and tested.
 - React app is a **scaffold**, not feature-complete.
 - OPTION execution routing (strike/expiry selection) — mapped but not built.
 - P3 verdicts are only meaningful once vetting runs on **backfilled real history** (now possible) rather than synthetic data.
+
+---
+
+## F. Session log
+
+### 2026-06-26 — Pre-live audit + 4 production bug fixes
+- **Discovered** the NSE was closed (movable holiday, not in `nse_holidays.yaml`).
+  Dashboard's "NSE OPEN" pill is purely time-of-day. Burned half a session
+  thinking the feed was broken. Added `titan/data/market_probe.py`: REST candle
+  probe gates `feed_supervisor` and paints a "🏖 NSE HOLIDAY" pill on the
+  dashboard via `titan:market:traded:YYYY-MM-DD` Redis key (cached till
+  midnight).
+- **Fix 1 (sizing):** `titan/risk/engine.py:144` was `available_cash * 1.0`
+  with a stale comment claiming MIS leverage was handled elsewhere — it wasn't.
+  Now `available_cash * settings.mis_leverage` (default 5×, configurable). Live
+  trade NESTLEIND opened at qty=162 vs intended ~47 because of this bug.
+- **Fix 2 (vwap_revert R:R):** target was `float(vwap)` exactly. By 09:15 with
+  one today-bar, VWAP ≈ entry, leaving a target window of paise against an ATR
+  stop. Now `target = vwap ± target_buffer_sigma * sigma` (default 0.5σ
+  overshoot). Added `min_today_bars=6` so the strategy doesn't fire on the
+  noisy first bar.
+- **Fix 3 (stale-bar replay):** after a supervisor restart, bar_writer can
+  re-publish yesterday's last 1m/5m bar from Redis. Supervisor was acting on
+  it and writing trades with `entry_ts = 2026-06-25 ...` while logs said
+  `2026-06-26`. Added a 5-minute freshness check in
+  `supervisor.py:_on_bar_event`.
+- **Audit findings (see `docs/11_go_live_readiness.md`):** 210 paper trades,
+  net **−₹1,732**, expectancy **−₹8/trade**, hit rate 51%, R=0.93. One paying
+  cell: `vwap_revert SELL` (+₹3,109 / 92 trades / 61% win); ORB SELL alone
+  cost −₹6,897. The 09:xx hour lost −₹7,172 across 164 trades. 06-24 opened
+  29 positions in a single 5-min bar.
+- **Decision:** **not ready for real money 2026-06-29.** Staged 4-gate plan
+  written; earliest responsible live date is 2026-08-10.
+- **New algo research:** `docs/12_new_strategies.md` — three candidates
+  grounded in the audit data, plus a literature scan of intraday-Indian-equity
+  patterns we haven't tried.

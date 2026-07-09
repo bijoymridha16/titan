@@ -23,7 +23,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import numpy as np
+
 from titan.strategies.base import Signal, SignalKind, Strategy
+from titan.strategies.supertrend_adx import _adx
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -42,8 +45,15 @@ class OpeningRangeBreakout(Strategy):
     name = "orb"
     timeframe = "5m"
 
+    # 2026-06-29 sweep on RELIANCE/HDFCBANK/ICICIBANK (5m, 180d):
+    #   - shorts catastrophic at every (adx × tgt) — disabled by default
+    #   - 2R strictly worse than 1.5R (hit rate collapses 45% → 31%)
+    #   - ADX 25 lifts longs-only PF 0.90 → 1.05 (break-even, not "ship")
+    # Re-test per-symbol on backfilled higher-beta names before going live.
     DEFAULTS = {"or_minutes": 15, "target_r": 1.5, "cutoff": "14:30",
-                "session_open": "09:15"}
+                "session_open": "09:15",
+                "adx_period": 14, "adx_min": 25.0,
+                "longs_only": True, "shorts_only": False}
 
     def __init__(self, symbol: str, params: Optional[dict] = None):
         super().__init__(symbol, {**self.DEFAULTS, **(params or {})})
@@ -112,21 +122,32 @@ class OpeningRangeBreakout(Strategy):
         rng = hi - lo
         tgt_r = float(self.params["target_r"])
 
+        # ADX trend-day filter — only break on confirmed trend regime.
+        adx_period = int(self.params["adx_period"])
+        if len(bars) < adx_period * 3:
+            return []
+        adx = _adx(bars, adx_period)
+        if not np.isfinite(adx.iloc[-1]) or adx.iloc[-1] < self.params["adx_min"]:
+            return []
+        adx_val = float(adx.iloc[-1])
+
         signals: list[Signal] = []
-        if not self._state.long_taken and float(last["c"]) > hi:
+        longs_ok = not self.params.get("shorts_only", False)
+        shorts_ok = not self.params.get("longs_only", False)
+        if longs_ok and not self._state.long_taken and float(last["c"]) > hi:
             signals.append(Signal(
                 ts=ts_ist, symbol=self.symbol, kind=SignalKind.ENTRY_LONG,
                 entry=float(last["c"]), stop=lo,
                 target=float(last["c"]) + tgt_r * rng,
-                reason=f"ORB long: close>{hi:.2f}",
+                reason=f"ORB long: close>{hi:.2f} ADX={adx_val:.1f}",
             ))
             self._state.long_taken = True
-        elif not self._state.short_taken and float(last["c"]) < lo:
+        elif shorts_ok and not self._state.short_taken and float(last["c"]) < lo:
             signals.append(Signal(
                 ts=ts_ist, symbol=self.symbol, kind=SignalKind.ENTRY_SHORT,
                 entry=float(last["c"]), stop=hi,
                 target=float(last["c"]) - tgt_r * rng,
-                reason=f"ORB short: close<{lo:.2f}",
+                reason=f"ORB short: close<{lo:.2f} ADX={adx_val:.1f}",
             ))
             self._state.short_taken = True
         return signals

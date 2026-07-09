@@ -36,6 +36,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from titan.brokers.base import Order, OrderSide
+from titan.config import settings
 from titan.risk.limits import RiskLimits
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -138,10 +139,10 @@ class RiskEngine:
                 metadata={"requested_qty": order.qty, "per_unit_risk": per_unit_risk},
             )
 
-        # funds
+        # funds (MIS intraday leverage)
         if order.side == OrderSide.BUY and order.price:
             need = order.price * order.qty
-            if need > available_cash * 1.0:  # MIS leverage handled elsewhere
+            if need > available_cash * settings.mis_leverage:
                 return RiskDecision(False, "insufficient funds")
 
         return RiskDecision(True)

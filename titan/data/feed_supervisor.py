@@ -87,6 +87,26 @@ class FeedSupervisor:
                 self.proc.kill()
         self.proc = None
 
+    def _holiday_probe_says_closed(self) -> bool:
+        """Check (or run) the runtime market probe. Returns True only if today
+        is confidently closed. Anything inconclusive (too early / probe error)
+        returns False so we don't false-positive a real trading day."""
+        from datetime import date as _date
+        from titan.data.market_probe import cache_key, probe_traded_today
+        cached = self.r.get(cache_key(_date.today()))
+        if cached == "0":
+            return True
+        if cached == "1":
+            return False
+        # not yet probed today — run it now (sync wrapper around async probe)
+        try:
+            import asyncio
+            res = asyncio.run(probe_traded_today(self.r))
+        except Exception as e:
+            log.warning("probe call failed: %s", e)
+            return False
+        return res is False
+
     def _publish(self, status: str, age: float | None) -> None:
         try:
             self.r.set(STATUS_KEY, status)
@@ -97,6 +117,14 @@ class FeedSupervisor:
     def tick(self) -> None:
         if not should_run(self.r):
             self._stop("market closed / sim mode")
+            self._publish("STOPPED", None)
+            return
+
+        # Holiday guard: calendar says open, but if Angel has zero traded
+        # candles past 09:25 IST it's an undeclared holiday / halt. The probe
+        # runs once per day (cached in Redis) and short-circuits the feed.
+        if self._holiday_probe_says_closed():
+            self._stop("NSE holiday (probe: no candles)")
             self._publish("STOPPED", None)
             return
 

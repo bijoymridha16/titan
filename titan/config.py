@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # ─── live-trading safety gates ───
     live_enabled: bool = False
     live_max_order_value: float = 25_000.0
+    # MIS intraday leverage multiplier on equity for the funds-gate check.
+    # NSE cash MIS = 5×; configurable so live can be tightened independently.
+    mis_leverage: float = 5.0
     live_allowed_products: str = "INTRADAY"
     live_allowed_exchanges: str = "NSE"
     live_dry_run: bool = True
